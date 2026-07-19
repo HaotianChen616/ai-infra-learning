@@ -15,6 +15,16 @@
 3. 运行 `make test` 验证本地环境。
 4. 用 `make lab-kv`、`make lab-scheduler`、`make lab-prefix` 建立性能直觉。
 
+## 学习网站
+
+`site/` 提供可浏览版本，包含 AI Infra 知识地图以及 vLLM、SGLang 独立专题页。
+
+```bash
+cd site
+npm install
+npm run dev
+```
+
 全部基础实验只依赖 Python 3.10+ 标准库，不要求 GPU，也不会自动下载模型。
 
 ## 仓库结构
