@@ -1,18 +1,18 @@
-import type { Metadata } from "next";
 import Link from "next/link";
+import { createPageMetadata } from "../page-metadata";
 import { PageProgress, SiteFooter, SiteHeader } from "../site-chrome";
 
-export const metadata: Metadata = {
-  title: "vLLM 学习路线",
-  description:
-    "从 PagedAttention、Continuous Batching 到 V1 进程架构，循序理解 vLLM。",
-};
+export const metadata = createPageMetadata(
+  "vLLM 学习路线",
+  "从 Paged KV、Continuous Batching 到 V1 进程架构，循序理解 vLLM。",
+  "/vllm",
+);
 
 const mechanisms = [
   {
     index: "01",
-    title: "PagedAttention",
-    body: "把每条请求的 KV 划分成固定 Block，通过 Block Table 映射到非连续物理内存，减少碎片并支持按需分配。",
+    title: "Paged KV / Block Manager",
+    body: "把每条请求的 KV 划分成固定 Block，通过 Block Table 映射到非连续物理内存，减少碎片并支持按需分配。这是仍然成立的分页思想。",
     effect: "容量 / 并发",
   },
   {
@@ -64,7 +64,7 @@ export default function VllmPage() {
             </div>
             <div className="framework-hero-grid">
               <div>
-                <div className="framework-badge">SERVING ENGINE · 01</div>
+                <div className="framework-badge">SERVING ENGINE · 01 · v0.25.1</div>
                 <h1>vLLM</h1>
                 <p className="framework-thesis">
                   先把它理解成：
@@ -194,6 +194,31 @@ export default function VllmPage() {
                 </article>
               ))}
             </div>
+            <aside className="version-note">
+              <b>名称提醒</b>
+              <p>
+                vLLM v0.25.0 删除的是旧的 <em>PagedAttention</em> attention
+                实现；V1 / Model Runner V2 仍使用按 Block 管理 KV、Block Table
+                和按需分配。讨论系统设计时，更准确的说法是 Paged KV Cache 或
+                Block Manager。
+              </p>
+              <a
+                href="https://github.com/vllm-project/vllm/releases/tag/v0.25.0"
+                target="_blank"
+                rel="noreferrer"
+              >
+                查看 v0.25.0 Release Notes ↗
+              </a>
+            </aside>
+            <aside className="hardware-note">
+              <b>精度与硬件视角</b>
+              <p>
+                KV 从 BF16 / FP16 降到 FP8 / INT8，理论字节数约减半；v0.25.0
+                还加入了 INT4 per-token-head 与 NVFP4 KV 路径。GPU、Ascend
+                NPU、XPU 等后端的 Kernel、内存布局、图捕获与集合通信不同，
+                所以“抽象相同”不等于“参数和瓶颈相同”。
+              </p>
+            </aside>
           </div>
         </section>
 
@@ -204,13 +229,13 @@ export default function VllmPage() {
               <p className="section-kicker">SOURCE TOUR</p>
               <h2>读源码时，顺着数据走</h2>
             </div>
-            <p>类名会随版本演进，下面的职责边界比具体文件路径更值得记忆。</p>
+            <p>职责边界要记住；链接锁定 v0.25.1，避免 main 分支变化导致对不上。</p>
           </div>
           <div className="source-tour">
             <div className="source-code">
               <div className="code-header">
                 <span>request_lifecycle.py</span>
-                <i>conceptual</i>
+                <i>mental model</i>
               </div>
               <pre>
                 <code>{`request = api.parse(payload)
@@ -224,26 +249,57 @@ while not request.finished:
     api.stream(output)`}</code>
               </pre>
             </div>
-            <ol className="source-steps">
+            <ol className="source-steps source-links">
               <li>
                 <span>01</span>
                 <div>
-                  <b>先找核心状态</b>
-                  <p>Request、Scheduler Output、KV Block、Attention Metadata。</p>
+                  <a
+                    href="https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/v1/engine/core.py"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Engine Core ↗
+                  </a>
+                  <p>入口、主循环、请求状态与 Worker 协调。</p>
                 </div>
               </li>
               <li>
                 <span>02</span>
                 <div>
-                  <b>再找主循环</b>
-                  <p>谁调用 schedule，谁发起 execute，谁回收完成请求。</p>
+                  <a
+                    href="https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/v1/core/sched/scheduler.py"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Scheduler ↗
+                  </a>
+                  <p>Token Budget、waiting/running 队列与抢占。</p>
                 </div>
               </li>
               <li>
                 <span>03</span>
                 <div>
-                  <b>最后看优化分支</b>
-                  <p>Prefix Cache、Chunked Prefill、Spec Decode 与并行策略。</p>
+                  <a
+                    href="https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/v1/core/kv_cache_manager.py"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    KV Cache Manager ↗
+                  </a>
+                  <p>Block 分配、Prefix Cache 命中与释放。</p>
+                </div>
+              </li>
+              <li>
+                <span>04</span>
+                <div>
+                  <a
+                    href="https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/v1/worker/gpu_model_runner.py"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    GPU Model Runner ↗
+                  </a>
+                  <p>准备输入与 Attention Metadata，执行模型。</p>
                 </div>
               </li>
             </ol>
@@ -290,7 +346,7 @@ while not request.finished:
         <section className="next-framework">
           <div className="shell next-framework-inner">
             <div>
-              <span>NEXT · 03 / 03</span>
+              <span>NEXT · 03 / 04</span>
               <h2>用 SGLang 对照另一种设计</h2>
               <p>重点观察 RadixAttention、Overlap Scheduler 和 PD 分离。</p>
             </div>

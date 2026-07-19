@@ -24,7 +24,7 @@
 
 ## 第 5 天：vLLM 与 SGLang
 
-理解两者都属于 LLM Serving Engine，不是 PyTorch 的替代品。认识 API Server、Scheduler、Model Worker、PagedAttention、RadixAttention 和 PD 分离。
+理解两者都属于 LLM Serving Engine，不是 PyTorch 的替代品。认识 API Server、Scheduler、Model Worker、Paged KV / Block Manager、RadixAttention 和 PD 分离。
 
 ## 第 6 天：CPU 机头与拓扑
 

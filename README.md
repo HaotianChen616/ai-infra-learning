@@ -4,7 +4,7 @@
 
 - GPU 服务器中的 CPU 机头与 NUMA/PCIe 拓扑
 - Prefill、Decode、Continuous Batching 与调度
-- KV Cache、PagedAttention、Prefix Cache 与 Offload
+- KV Cache、Paged KV / Block Manager、Prefix Cache 与 Offload
 - vLLM、SGLang、PyTorch 的分层关系
 - TTFT、TPOT、Goodput 等服务指标
 
@@ -17,7 +17,9 @@
 
 ## 学习网站
 
-`site/` 提供可浏览版本，包含 AI Infra 知识地图以及 vLLM、SGLang 独立专题页。
+[AI Infra Field Guide](https://ai-infra-field-guide.htchen199905.chatgpt.site)
+提供可浏览版本，包含知识地图、vLLM、SGLang、Agent / Gateway
+专题与术语表。网站源码位于 `site/`。
 
 ```bash
 cd site

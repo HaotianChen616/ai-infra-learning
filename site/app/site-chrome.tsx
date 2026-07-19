@@ -1,6 +1,6 @@
 import Link from "next/link";
 
-type ActivePage = "home" | "vllm" | "sglang";
+type ActivePage = "home" | "vllm" | "sglang" | "gateway" | "glossary";
 
 export function SiteHeader({ active }: { active: ActivePage }) {
   return (
@@ -23,6 +23,9 @@ export function SiteHeader({ active }: { active: ActivePage }) {
           </Link>
           <Link className={active === "sglang" ? "active" : ""} href="/sglang">
             SGLang
+          </Link>
+          <Link className={active === "glossary" ? "active" : ""} href="/glossary">
+            术语表
           </Link>
         </nav>
 
@@ -51,6 +54,8 @@ export function SiteFooter() {
           <Link href="/">知识地图</Link>
           <Link href="/vllm">vLLM</Link>
           <Link href="/sglang">SGLang</Link>
+          <Link href="/gateway">Agent / Gateway</Link>
+          <Link href="/glossary">术语表</Link>
           <a
             href="https://github.com/HaotianChen616/ai-infra-learning"
             target="_blank"
@@ -64,13 +69,13 @@ export function SiteFooter() {
   );
 }
 
-export function PageProgress({ current }: { current: 1 | 2 | 3 }) {
+export function PageProgress({ current }: { current: 1 | 2 | 3 | 4 }) {
   return (
-    <div className="page-progress" aria-label={`学习路径，第 ${current} 站，共 3 站`}>
-      {[1, 2, 3].map((step) => (
+    <div className="page-progress" aria-label={`学习路径，第 ${current} 站，共 4 站`}>
+      {[1, 2, 3, 4].map((step) => (
         <span className={step <= current ? "filled" : ""} key={step} />
       ))}
-      <small>0{current} / 03</small>
+      <small>0{current} / 04</small>
     </div>
   );
 }

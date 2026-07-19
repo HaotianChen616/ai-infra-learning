@@ -1,12 +1,12 @@
-import type { Metadata } from "next";
 import Link from "next/link";
+import { createPageMetadata } from "../page-metadata";
 import { PageProgress, SiteFooter, SiteHeader } from "../site-chrome";
 
-export const metadata: Metadata = {
-  title: "SGLang 学习路线",
-  description:
-    "从 RadixAttention、Overlap Scheduler 到 PD 分离，循序理解 SGLang Runtime。",
-};
+export const metadata = createPageMetadata(
+  "SGLang 学习路线",
+  "从 RadixAttention、Overlap Scheduler 到 PD 分离，循序理解 SGLang Runtime。",
+  "/sglang",
+);
 
 export default function SglangPage() {
   return (
@@ -25,7 +25,9 @@ export default function SglangPage() {
             </div>
             <div className="framework-hero-grid">
               <div>
-                <div className="framework-badge">SERVING ENGINE · 02</div>
+                <div className="framework-badge">
+                  SERVING ENGINE · 02 · v0.5.15.post1
+                </div>
                 <h1>SGLang</h1>
                 <p className="framework-thesis">
                   先把它理解成：
@@ -224,6 +226,30 @@ export default function SglangPage() {
               </article>
             ))}
           </div>
+          <div className="pinned-source-row">
+            <span>SOURCE · v0.5.15.post1</span>
+            <a
+              href="https://github.com/sgl-project/sglang/blob/v0.5.15.post1/python/sglang/srt/managers/tokenizer_manager.py"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Tokenizer Manager ↗
+            </a>
+            <a
+              href="https://github.com/sgl-project/sglang/blob/v0.5.15.post1/python/sglang/srt/managers/scheduler.py"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Scheduler ↗
+            </a>
+            <a
+              href="https://github.com/sgl-project/sglang/blob/v0.5.15.post1/python/sglang/srt/mem_cache/radix_cache.py"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Radix Cache ↗
+            </a>
+          </div>
         </section>
 
         <section className="section pd-section">
@@ -342,12 +368,12 @@ export default function SglangPage() {
         <section className="next-framework">
           <div className="shell next-framework-inner">
             <div>
-              <span>BACK TO · 01 / 03</span>
-              <h2>回到完整 AI Infra 地图</h2>
-              <p>把框架机制重新放回 CPU、GPU、KV 和性能指标的全链路中。</p>
+              <span>NEXT · 04 / 04</span>
+              <h2>把推理引擎接回业务入口</h2>
+              <p>继续学习 Agent / Gateway 的路由、流控、工具调用与可观测性。</p>
             </div>
-            <Link className="button button-light" href="/">
-              返回知识地图 <span aria-hidden="true">→</span>
+            <Link className="button button-light" href="/gateway">
+              前往 Agent / Gateway <span aria-hidden="true">→</span>
             </Link>
           </div>
         </section>

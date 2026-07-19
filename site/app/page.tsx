@@ -1,12 +1,12 @@
-import type { Metadata } from "next";
 import Link from "next/link";
+import { createPageMetadata } from "./page-metadata";
 import { PageProgress, SiteFooter, SiteHeader } from "./site-chrome";
 
-export const metadata: Metadata = {
-  title: "知识地图",
-  description:
-    "从一次请求出发，理解 CPU、GPU、KV Cache、调度、推理指标和 Serving Framework。",
-};
+export const metadata = createPageMetadata(
+  "知识地图",
+  "从一次请求出发，理解 CPU、GPU、KV Cache、调度、推理指标和 Serving Framework。",
+  "/",
+);
 
 export default function Home() {
   return (
@@ -278,8 +278,15 @@ export default function Home() {
 
             <div className="concept-stack">
               {[
-                ["PagedAttention", "KV 切成固定 Block，按需分配，减少内存碎片。"],
+                [
+                  "Paged KV / Block Manager",
+                  "KV 切成固定 Block，按需分配，减少碎片。它是系统设计；不要与 v0.25.0 删除的旧 PagedAttention 实现混为一谈。",
+                ],
                 ["Prefix Cache", "相同 Token 前缀直接复用 KV，主要节省 Prefill。"],
+                [
+                  "Quantized KV",
+                  "BF16 每元素 2 Bytes；FP8 / INT8 通常为 1 Byte，可近似把逻辑容量减半，但支持范围、精度与性能要实测。",
+                ],
                 ["KV Offload", "用 CPU/SSD 容量换 GPU 容量，但要支付传输成本。"],
                 ["Preemption", "KV 紧张时暂停请求，通过 Evict 或 Recompute 腾空间。"],
               ].map(([title, body], index) => (
@@ -336,7 +343,7 @@ export default function Home() {
                   <i aria-hidden="true">↗</i>
                 </div>
                 <h3>vLLM</h3>
-                <p>从 PagedAttention 出发，理解 Scheduler、KV Block Manager 与 V1 进程架构。</p>
+                <p>从 Paged KV 出发，理解 Scheduler、KV Block Manager 与 V1 进程架构。</p>
                 <ul>
                   <li>Continuous Batching</li>
                   <li>Chunked Prefill</li>
@@ -357,6 +364,20 @@ export default function Home() {
                   <li>PD Disaggregation</li>
                 </ul>
                 <strong>进入学习路线 →</strong>
+              </Link>
+              <Link className="framework-card gateway-card" href="/gateway">
+                <div className="framework-card-top">
+                  <span>专题 03</span>
+                  <i aria-hidden="true">↗</i>
+                </div>
+                <h3>Agent / Gateway</h3>
+                <p>把推理引擎放回真实业务链路，理解路由、流控、工具调用、可观测性与提交边界。</p>
+                <ul>
+                  <li>Admission Control</li>
+                  <li>Streaming</li>
+                  <li>Tool Runtime</li>
+                </ul>
+                <strong>进入应用层路线 →</strong>
               </Link>
             </div>
           </div>
@@ -391,6 +412,9 @@ export default function Home() {
               <strong>没有可比性。</strong>
             </p>
           </div>
+          <Link className="glossary-link" href="/glossary">
+            不熟悉这些缩写？打开按类别索引的术语表 <span aria-hidden="true">→</span>
+          </Link>
         </section>
 
         <section className="closing-cta">
@@ -406,6 +430,9 @@ export default function Home() {
               </Link>
               <Link className="button button-outline-light" href="/sglang">
                 学习 SGLang
+              </Link>
+              <Link className="button button-outline-light" href="/gateway">
+                学习 Agent / Gateway
               </Link>
             </div>
           </div>
