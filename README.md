@@ -4,7 +4,7 @@
 
 - GPU 服务器中的 CPU 机头与 NUMA/PCIe 拓扑
 - Prefill、Decode、Continuous Batching 与调度
-- KV Cache、PagedAttention、Prefix Cache 与 Offload
+- KV Cache、Paged KV / Block Manager、Prefix Cache 与 Offload
 - vLLM、SGLang、PyTorch 的分层关系
 - TTFT、TPOT、Goodput 等服务指标
 
@@ -14,6 +14,18 @@
 2. 阅读 [`docs/02-hands-on-guide.md`](docs/02-hands-on-guide.md)，按顺序完成实验。
 3. 运行 `make test` 验证本地环境。
 4. 用 `make lab-kv`、`make lab-scheduler`、`make lab-prefix` 建立性能直觉。
+
+## 学习网站
+
+[AI Infra Field Guide](https://ai-infra-field-guide.htchen199905.chatgpt.site)
+提供可浏览版本，包含知识地图、vLLM、SGLang、Agent / Gateway
+专题与术语表。网站源码位于 `site/`。
+
+```bash
+cd site
+npm install
+npm run dev
+```
 
 全部基础实验只依赖 Python 3.10+ 标准库，不要求 GPU，也不会自动下载模型。
 

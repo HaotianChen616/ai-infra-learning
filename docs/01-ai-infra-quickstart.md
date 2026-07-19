@@ -116,7 +116,7 @@ BF16 = 2 字节
 
 | 词 | 含义 |
 |---|---|
-| PagedAttention | 把 KV 切成固定大小的块，按需分配，并允许物理内存不连续 |
+| Paged KV / Block Manager | 把 KV 切成固定大小的块，按需分配，并允许物理内存不连续 |
 | Block / Page | 一段固定数量 Token 对应的 KV 存储单元 |
 | Block Table | 请求的逻辑 Token 块到物理 KV 块的映射 |
 | Prefix Cache | 请求拥有相同 Token 前缀时，复用已经计算的 KV |
@@ -132,6 +132,11 @@ BF16 = 2 字节
 Prefix Cache 匹配的是相同 Token 前缀，而不是语义相近的文本。Chat Template、特殊 Token、LoRA 或模型配置不同，都可能造成无法复用。
 
 Prefix Cache 主要节省 Prefill，不会直接减少生成长答案所需的 Decode 步数。
+
+> 版本提醒（2026-07）：vLLM v0.25.0 删除的是旧的 `PagedAttention`
+> attention 实现。按 Block 管理 KV、Block Table 与按需分配这些分页设计仍在
+> V1 / Model Runner V2 中使用。讨论系统设计时，优先说
+> Paged KV Cache 或 Block Manager；`PagedAttention` 可作为历史术语理解。
 
 KV Offload 是以 CPU 内存容量换 GPU 容量，但要支付 PCIe、CXL、网络或存储的传输开销。系统会尝试把数据搬运和计算重叠，但 Offload 不等于免费扩容。
 
@@ -197,7 +202,7 @@ CPU:       [准备 N+1]    [准备 N+2]
 
 可以记成：以高效 KV 内存管理和动态调度为中心的通用 LLM Serving Engine。
 
-重点词：PagedAttention、Continuous Batching、Prefix Caching、Chunked Prefill、Speculative Decoding、CUDA Graph、TP/PP/DP/EP、PD Disaggregation。
+重点词：Paged KV / Block Manager、Continuous Batching、Prefix Caching、Chunked Prefill、Speculative Decoding、CUDA Graph、TP/PP/DP/EP、PD Disaggregation。
 
 ### SGLang
 
