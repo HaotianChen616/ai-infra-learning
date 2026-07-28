@@ -14,6 +14,10 @@
 2. 阅读 [`docs/02-hands-on-guide.md`](docs/02-hands-on-guide.md)，按顺序完成实验。
 3. 运行 `make test` 验证本地环境。
 4. 用 `make lab-kv`、`make lab-scheduler`、`make lab-prefix` 建立性能直觉。
+5. 在 Linux NVIDIA GPU 主机阅读并执行
+   [`docs/04-h2d-d2h-profiling.md`](docs/04-h2d-d2h-profiling.md)，拆解推理数据搬运。
+6. 昇腾 910B4 环境使用
+   [`docs/05-ascend-910b4-h2d-d2h-profiling.md`](docs/05-ascend-910b4-h2d-d2h-profiling.md)。
 
 ## 学习网站
 
@@ -27,7 +31,9 @@ npm install
 npm run dev
 ```
 
-全部基础实验只依赖 Python 3.10+ 标准库，不要求 GPU，也不会自动下载模型。
+基础模拟实验只依赖 Python 3.10+ 标准库，不要求加速卡，也不会自动下载模型。
+H2D/D2H 实验是可选的真实硬件实验：NVIDIA 环境需要 CUDA 版 PyTorch，
+昇腾环境需要匹配 CANN 的 PyTorch 与 `torch_npu`。
 
 ## 仓库结构
 
@@ -37,8 +43,13 @@ npm run dev
 │   ├── 00-learning-roadmap.md
 │   ├── 01-ai-infra-quickstart.md
 │   ├── 02-hands-on-guide.md
-│   └── 03-official-reading-list.md
+│   ├── 03-official-reading-list.md
+│   ├── 04-h2d-d2h-profiling.md
+│   └── 05-ascend-910b4-h2d-d2h-profiling.md
 ├── labs/
+│   ├── h2d_d2h_benchmark.py
+│   ├── run_h2d_d2h_validation.sh
+│   ├── run_ascend_h2d_d2h_validation.sh
 │   ├── kv_cache_calculator.py
 │   ├── scheduler_simulator.py
 │   ├── prefix_cache_simulator.py
@@ -55,6 +66,10 @@ make lab-kv
 make lab-scheduler
 make lab-prefix
 python3 labs/openai_stream_benchmark.py --help
+# 仅在 Linux NVIDIA GPU 主机：
+make lab-h2d-d2h
+# 仅在昇腾 NPU 主机：
+make lab-h2d-d2h-ascend
 ```
 
 ## 学习原则

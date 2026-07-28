@@ -1,4 +1,4 @@
-.PHONY: test lab-kv lab-scheduler lab-prefix
+.PHONY: test lab-kv lab-scheduler lab-prefix lab-h2d-d2h lab-h2d-d2h-ascend
 
 PYTHON ?= python3
 
@@ -16,3 +16,15 @@ lab-scheduler:
 
 lab-prefix:
 	$(PYTHON) labs/prefix_cache_simulator.py
+
+lab-h2d-d2h:
+	$(PYTHON) labs/h2d_d2h_benchmark.py \
+		--backend cuda \
+		--sizes 4KiB,1MiB,16MiB,64MiB \
+		--output-dir artifacts/h2d_d2h
+
+lab-h2d-d2h-ascend:
+	$(PYTHON) labs/h2d_d2h_benchmark.py \
+		--backend npu \
+		--sizes 4KiB,1MiB,16MiB,64MiB \
+		--output-dir artifacts/ascend_h2d_d2h

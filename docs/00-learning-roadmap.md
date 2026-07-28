@@ -30,6 +30,14 @@
 
 认识 Socket、物理核、vCPU、NUMA、DDR、PCIe、Pinned Memory、NIC 和 RDMA。练习回答：某张 GPU 与哪个 CPU Socket、哪块内存、哪张网卡距离最近？
 
+如果有 Linux NVIDIA GPU 环境，按照
+[`04-h2d-d2h-profiling.md`](04-h2d-d2h-profiling.md) 分开测量 CPU 提交、
+GPU copy 与端到端完成时间。
+
+如果使用昇腾 910B4，则按照
+[`05-ascend-910b4-h2d-d2h-profiling.md`](05-ascend-910b4-h2d-d2h-profiling.md)
+增加 torch_npu task queue、mstx、msprof、HCCS/PCIe 与 NPU 亲和性验证。
+
 ## 第 7 天：性能评测
 
 理解 TTFT、TPOT/ITL、E2E、RPS、Input/Output tokens/s、p99 和 Goodput。对任何 benchmark 都先问：
