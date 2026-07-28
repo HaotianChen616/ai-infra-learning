@@ -18,6 +18,8 @@
    [`docs/04-h2d-d2h-profiling.md`](docs/04-h2d-d2h-profiling.md)，拆解推理数据搬运。
 6. 昇腾 910B4 环境使用
    [`docs/05-ascend-910b4-h2d-d2h-profiling.md`](docs/05-ascend-910b4-h2d-d2h-profiling.md)。
+7. 分析 A100 INT8 W8A8 真实 vLLM 推理中的 CUDA 同步等待，使用
+   [`docs/06-vllm-cuda-sync-profiling.md`](docs/06-vllm-cuda-sync-profiling.md)。
 
 ## 学习网站
 
@@ -45,11 +47,15 @@ H2D/D2H 实验是可选的真实硬件实验：NVIDIA 环境需要 CUDA 版 PyTo
 │   ├── 02-hands-on-guide.md
 │   ├── 03-official-reading-list.md
 │   ├── 04-h2d-d2h-profiling.md
-│   └── 05-ascend-910b4-h2d-d2h-profiling.md
+│   ├── 05-ascend-910b4-h2d-d2h-profiling.md
+│   └── 06-vllm-cuda-sync-profiling.md
 ├── labs/
 │   ├── h2d_d2h_benchmark.py
+│   ├── summarize_cuda_sync.py
+│   ├── verify_int8_w8a8_config.py
 │   ├── run_h2d_d2h_validation.sh
 │   ├── run_ascend_h2d_d2h_validation.sh
+│   ├── run_vllm_cuda_sync_profile.sh
 │   ├── kv_cache_calculator.py
 │   ├── scheduler_simulator.py
 │   ├── prefix_cache_simulator.py
@@ -70,6 +76,8 @@ python3 labs/openai_stream_benchmark.py --help
 make lab-h2d-d2h
 # 仅在昇腾 NPU 主机：
 make lab-h2d-d2h-ascend
+# 真实 vLLM CUDA 同步 API profiling：
+bash labs/run_vllm_cuda_sync_profile.sh --help
 ```
 
 ## 学习原则

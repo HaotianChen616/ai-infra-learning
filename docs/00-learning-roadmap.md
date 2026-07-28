@@ -38,6 +38,12 @@ GPU copy 与端到端完成时间。
 [`05-ascend-910b4-h2d-d2h-profiling.md`](05-ascend-910b4-h2d-d2h-profiling.md)
 增加 torch_npu task queue、mstx、msprof、HCCS/PCIe 与 NPU 亲和性验证。
 
+完成链路微基准后，按照
+[`06-vllm-cuda-sync-profiling.md`](06-vllm-cuda-sync-profiling.md)
+在真实 vLLM Prefill/Decode 中拆解 CUDA 同步 API、GPU 前序工作和 CPU 调度等待。
+该手册将模型固定为 A100 上的 Qwen3-32B INT8 W8A8，并在采集前校验
+`compressed-tensors` 量化元数据。
+
 ## 第 7 天：性能评测
 
 理解 TTFT、TPOT/ITL、E2E、RPS、Input/Output tokens/s、p99 和 Goodput。对任何 benchmark 都先问：

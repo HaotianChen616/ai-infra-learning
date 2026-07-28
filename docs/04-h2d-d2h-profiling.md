@@ -13,6 +13,11 @@
 昇腾 910B4 / CANN / `torch_npu` 的对应流程、工具映射与验证入口见
 [《昇腾 910B4 H2D/D2H 性能分析与实践手册》](05-ascend-910b4-h2d-d2h-profiling.md)。
 
+如果目标是分析真实 vLLM 推理中 `cudaDeviceSynchronize`、
+`cudaEventSynchronize` 等 Host API 的等待时间，本微基准只能作为链路校准对照；
+主实验见
+[《A100 INT8 W8A8 vLLM 推理中的 CUDA 同步等待》](06-vllm-cuda-sync-profiling.md)。
+
 ## 1. 先给结论
 
 - H2D / D2H 的**软件流程**在不同 NVIDIA GPU 上大体相同，但性能并非与硬件无关。A100 是 PCIe 卡还是 SXM、CPU 到 GPU 的 PCIe 拓扑、NUMA、IOMMU、主机内存带宽、GPU copy engine 和系统负载都会改变结果。

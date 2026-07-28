@@ -121,6 +121,29 @@ make lab-h2d-d2h-ascend
 昇腾手册提供 Ascend PyTorch Profiler、mstx、`msprof`、task queue、
 `CPU_AFFINITY_CONF`、PCIe/HCCS 与 Host 调度验证。
 
+## 实验 6：vLLM CUDA 同步等待分析
+
+完整手册：
+[`docs/06-vllm-cuda-sync-profiling.md`](06-vllm-cuda-sync-profiling.md)
+
+这个实验在真实 vLLM 服务中分析 `cudaDeviceSynchronize`、
+`cudaEventSynchronize` 和 `cudaStreamSynchronize` 等调用的 Host API wall
+time，并用 Nsight Systems 拆分：
+
+- GPU kernel、CUDA Graph、NCCL 或 Memcpy 前序等待；
+- CUDA Runtime/Driver；
+- CPU sleeping、wakeup 和 runnable/off-CPU 调度延迟；
+- Prefill、Decode、sampling 与 output processing 的调用来源。
+
+Qwen3-32B INT8 W8A8（`compressed-tensors`）、A100、输入 1024、输出 128、
+并发 8 的默认入口：
+
+```bash
+bash labs/run_vllm_cuda_sync_profile.sh --help
+```
+
+纯 H2D/D2H 微基准只作为 PCIe/pinned-memory 对照，不能代替真实推理同步分析。
+
 ## 下一阶段建议
 
 完成基础实验后，再开始真实框架实验：
