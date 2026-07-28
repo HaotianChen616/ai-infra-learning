@@ -11,7 +11,8 @@
 [`labs/h2d_d2h_benchmark.py`](../labs/h2d_d2h_benchmark.py)。
 
 昇腾 910B4 / CANN / `torch_npu` 的对应流程、工具映射与验证入口见
-[《昇腾 910B4 H2D/D2H 性能分析与实践手册》](05-ascend-910b4-h2d-d2h-profiling.md)。
+[《昇腾 910B4 Qwen3.6-27B-W8A8 端到端同步等待分析手册》](05-ascend-910b4-h2d-d2h-profiling.md)；
+H2D/D2H 微基准只作为其中的补充校准。
 
 如果目标是分析真实 vLLM 推理中 `cudaDeviceSynchronize`、
 `cudaEventSynchronize` 等 Host API 的等待时间，本微基准只能作为链路校准对照；

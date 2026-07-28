@@ -36,9 +36,11 @@ GPU copy 与端到端完成时间。
 
 如果使用昇腾 910B4，则按照
 [`05-ascend-910b4-h2d-d2h-profiling.md`](05-ascend-910b4-h2d-d2h-profiling.md)
-增加 torch_npu task queue、mstx、msprof、HCCS/PCIe 与 NPU 亲和性验证。
+在已有 vLLM-Ascend 容器中运行 Qwen3.6-27B-W8A8 的 1024→128、并发 8
+端到端实验，用 Ascend PyTorch Profiler、CANN API 统计和 timeline 拆解
+Host 同步等待、NPU/HCCL/DMA 与 CPU 调度。
 
-完成链路微基准后，按照
+NVIDIA A100 环境则按照
 [`06-vllm-cuda-sync-profiling.md`](06-vllm-cuda-sync-profiling.md)
 在真实 vLLM Prefill/Decode 中拆解 CUDA 同步 API、GPU 前序工作和 CPU 调度等待。
 该手册将模型固定为 A100 上的 Qwen3-32B INT8 W8A8，并在采集前校验

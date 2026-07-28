@@ -88,11 +88,11 @@ python3 labs/openai_stream_benchmark.py \
 
 注意：一次 SSE 内容块不一定等于一个模型 Token，因此这是轻量观测工具，不是严格的 token-level benchmark。
 
-## 实验 5：H2D / D2H 分层性能分析
+## 实验 5：真实推理中的 Host/Device 同步等待
 
 详细手册：[`docs/04-h2d-d2h-profiling.md`](04-h2d-d2h-profiling.md)
 
-昇腾 910B4 手册：
+昇腾 910B4 端到端手册：
 [`docs/05-ascend-910b4-h2d-d2h-profiling.md`](05-ascend-910b4-h2d-d2h-profiling.md)
 
 这个实验需要 Linux、NVIDIA GPU 与 CUDA 版 PyTorch。建议在目标 A100
@@ -102,13 +102,14 @@ python3 labs/openai_stream_benchmark.py \
 make lab-h2d-d2h
 ```
 
-在昇腾 910B4、CANN 与 `torch_npu` 环境运行：
+在已经能正常部署模型的 vLLM-Ascend 容器内，查看 Qwen3.6-27B-W8A8
+端到端实验入口：
 
 ```bash
-make lab-h2d-d2h-ascend
+make lab-vllm-ascend-e2e
 ```
 
-它会把一次 CPU↔加速卡 copy 拆成：
+NVIDIA 微基准会把一次 CPU↔加速卡 copy 拆成：
 
 - Python/CPU 数据准备时间；
 - PyTorch/CUDA 或 `torch_npu` 主机提交时间；
@@ -116,10 +117,10 @@ make lab-h2d-d2h-ascend
 - 提交到完成的可见延迟；
 - 从准备到完成的端到端时间。
 
-实验矩阵覆盖 H2D/D2H、pageable/pinned、blocking/nonblocking 与逐次/批量
-同步。NVIDIA 手册提供 PyTorch Profiler、Nsight Systems 与 `perf`；
-昇腾手册提供 Ascend PyTorch Profiler、mstx、`msprof`、task queue、
-`CPU_AFFINITY_CONF`、PCIe/HCCS 与 Host 调度验证。
+昇腾主实验不是纯 H2D/D2H 微基准，而是固定输入 1024、输出 128、并发 8，
+采集 vLLM 服务的 Prefill/Decode、CANN 同步 API、NPU kernel、HCCL、Memcpy
+和 CPU 侧等待，并使用 1024→1 control 做差分。只有 timeline 指向 copy
+问题时，才用 `make lab-h2d-d2h-ascend` 做链路校准。
 
 ## 实验 6：vLLM CUDA 同步等待分析
 

@@ -1,4 +1,4 @@
-.PHONY: test lab-kv lab-scheduler lab-prefix lab-h2d-d2h lab-h2d-d2h-ascend
+.PHONY: test lab-kv lab-scheduler lab-prefix lab-h2d-d2h lab-h2d-d2h-ascend lab-vllm-ascend-e2e
 
 PYTHON ?= python3
 
@@ -28,3 +28,6 @@ lab-h2d-d2h-ascend:
 		--backend npu \
 		--sizes 4KiB,1MiB,16MiB,64MiB \
 		--output-dir artifacts/ascend_h2d_d2h
+
+lab-vllm-ascend-e2e:
+	bash labs/run_vllm_ascend_e2e_profile.sh --help

@@ -16,8 +16,9 @@
 4. 用 `make lab-kv`、`make lab-scheduler`、`make lab-prefix` 建立性能直觉。
 5. 在 Linux NVIDIA GPU 主机阅读并执行
    [`docs/04-h2d-d2h-profiling.md`](docs/04-h2d-d2h-profiling.md)，拆解推理数据搬运。
-6. 昇腾 910B4 环境使用
-   [`docs/05-ascend-910b4-h2d-d2h-profiling.md`](docs/05-ascend-910b4-h2d-d2h-profiling.md)。
+6. 在已有 vLLM-Ascend 容器的昇腾 910B4 环境，使用
+   [`docs/05-ascend-910b4-h2d-d2h-profiling.md`](docs/05-ascend-910b4-h2d-d2h-profiling.md)
+   分析 Qwen3.6-27B-W8A8 端到端同步等待。
 7. 分析 A100 INT8 W8A8 真实 vLLM 推理中的 CUDA 同步等待，使用
    [`docs/06-vllm-cuda-sync-profiling.md`](docs/06-vllm-cuda-sync-profiling.md)。
 
@@ -34,8 +35,8 @@ npm run dev
 ```
 
 基础模拟实验只依赖 Python 3.10+ 标准库，不要求加速卡，也不会自动下载模型。
-H2D/D2H 实验是可选的真实硬件实验：NVIDIA 环境需要 CUDA 版 PyTorch，
-昇腾环境需要匹配 CANN 的 PyTorch 与 `torch_npu`。
+真实硬件实验是可选项：NVIDIA 环境需要 CUDA 版 PyTorch；昇腾端到端实验
+假设已有能部署 Qwen3.6-27B-W8A8 的 vLLM-Ascend 容器。
 
 ## 仓库结构
 
@@ -51,10 +52,12 @@ H2D/D2H 实验是可选的真实硬件实验：NVIDIA 环境需要 CUDA 版 PyTo
 │   └── 06-vllm-cuda-sync-profiling.md
 ├── labs/
 │   ├── h2d_d2h_benchmark.py
+│   ├── summarize_ascend_sync.py
 │   ├── summarize_cuda_sync.py
+│   ├── verify_ascend_w8a8_model.py
 │   ├── verify_int8_w8a8_config.py
 │   ├── run_h2d_d2h_validation.sh
-│   ├── run_ascend_h2d_d2h_validation.sh
+│   ├── run_vllm_ascend_e2e_profile.sh
 │   ├── run_vllm_cuda_sync_profile.sh
 │   ├── kv_cache_calculator.py
 │   ├── scheduler_simulator.py
@@ -74,8 +77,8 @@ make lab-prefix
 python3 labs/openai_stream_benchmark.py --help
 # 仅在 Linux NVIDIA GPU 主机：
 make lab-h2d-d2h
-# 仅在昇腾 NPU 主机：
-make lab-h2d-d2h-ascend
+# 在已有 vLLM-Ascend 环境的昇腾 910B4 容器内：
+make lab-vllm-ascend-e2e
 # 真实 vLLM CUDA 同步 API profiling：
 bash labs/run_vllm_cuda_sync_profile.sh --help
 ```

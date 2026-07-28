@@ -1,656 +1,649 @@
-# 昇腾 910B4 推理 H2D / D2H 性能分析手册
+# 昇腾 910B4：Qwen3.6-27B-W8A8 vLLM 端到端同步等待分析手册
 
-这份手册把
-[`04-h2d-d2h-profiling.md`](04-h2d-d2h-profiling.md)
-中的通用测量方法映射到昇腾 910B4、`torch_npu`、CANN、`msprof` 和
-MindStudio Insight。
+本文不再把 H2D/D2H 微基准当成主实验。目标是在**另一台已经具备可用
+`vllm serve` 环境的现有容器内**，复现实质性的在线推理负载，回答：
 
-实验入口仍然是
-[`labs/h2d_d2h_benchmark.py`](../labs/h2d_d2h_benchmark.py)，通过
-`--backend npu` 选择昇腾后端。
+> Qwen3.6-27B-W8A8 在昇腾 910B4 上以 vLLM-Ascend 服务时，
+> Host 侧同步等待 API 花了多少时间；这些时间是 Python/框架开销、
+> CANN Runtime、NPU/HCCL 前序任务、DMA/PCIe，还是 OS 调度造成的；
+> 哪些优化有实际收益？
 
-## 1. 范围与结论
+手册不创建镜像、不安装 CANN，也不重新搭建 vLLM。实验命令均从已经能成功
+启动该模型的容器内执行。若已有启动命令与本文默认参数不同，以已验证可工作的
+容器参数为准，并把差异写入实验记录。
 
-- 本手册面向 Linux Host + 昇腾 910B4 的 PyTorch 在线推理或推理微基准。
-- 910B4 可能出现在不同 Atlas A2 产品形态、裸机、容器或虚拟化环境中。
-  必须记录服务器型号、EP/RC 模式、NPU 映射、CANN、驱动、固件、
-  PyTorch 和 `torch_npu` 版本，不能只写“910B4”。
-- Host↔Device 在典型 EP 模式下走 PCIe；HCCS 是 NPU 间互联。看到 HCCS
-  带宽不能将其当作 H2D/D2H 带宽。
-- pinned host memory 仍然是可靠异步 H2D/D2H 的前提。官方 MindIE Torch
-  文档明确说明，异步 copy 的 CPU tensor 需要 `pin_memory=True`，否则没有
-  异步效果。
-- `torch_npu` 默认的异步执行路径还包含 task queue。Python
-  `copy_()` 返回后，任务可能先进入 PyTorch/torch_npu 的下发流水，再进入
-  CANN Runtime 和 NPU stream。因此必须同时测 host API、NPU Event 和完成时间。
-- `ASCEND_LAUNCH_BLOCKING=1` 是调试配置，会强制同步并关闭 task queue。
-  它能帮助定位隐式异步错误，但不能作为性能基线。
-- `msprof` 的 PCIe 层是系统级采样，适合关联链路是否繁忙；单次 copy
-  延迟仍应以 NPU Event 和应用 wall clock 为主。官方资料也提示部分 PCIe
-  字段是粗粒度统计值。
+配套工具：
 
-## 2. NVIDIA 与昇腾工具映射
+- `labs/run_vllm_ascend_e2e_profile.sh`：启动服务、预热、压测、采集和解析；
+- `labs/verify_ascend_w8a8_model.py`：检查本地模型的 W8A8 元数据；
+- `labs/summarize_ascend_sync.py`：汇总 `trace_view.json` 中的同步 API Host wall；
+- `labs/h2d_d2h_benchmark.py`：仅在 timeline 已指向搬运问题时做补充微基准。
 
-| 分层 | NVIDIA/A100 | 昇腾 910B4 |
+## 1. 固定实验卡
+
+先固定口径，避免每次采集都在改变问题：
+
+| 项目 | 基准值 |
+|---|---|
+| 设备 | 昇腾 910B4，记录服务器产品形态、卡数、NUMA/HCCS/PCIe 拓扑 |
+| 容器 | 已能正常执行 `vllm serve` 的现有 vLLM-Ascend 容器 |
+| 模型 | `Eco-Tech/Qwen3.6-27B-w8a8` 或对应本地目录 |
+| 量化 | ModelSlim W8A8，服务参数 `--quantization ascend` |
+| dtype | `bfloat16`；这是非量化算子的计算类型，不代表权重未量化 |
+| 并行 | TP=2、DP=1；显存或部署约束不同时记录实际值 |
+| 输入/输出 | 每请求 1024 input tokens、128 output tokens |
+| 并发 | 8 个并发请求、一次发出 8 个请求、`request-rate=inf` |
+| 输出控制 | `--ignore-eos`，尽量保证每请求生成 128 token |
+| Prefix Cache | 关闭，防止第二次相同长度请求改变 Prefill 工作量 |
+| Speculative/MTP | 主实验关闭；作为单独 A/B，不混入基线 |
+| Task Queue | `TASK_QUEUE_ENABLE=1` |
+| Blocking | `ASCEND_LAUNCH_BLOCKING=0` |
+| Profiler stack | 主实验 `false`，有明确调用栈问题时再单独开启 |
+
+Qwen3.6-27B 是混合 Gated DeltaNet/全注意力模型，并接受过 MTP 训练。主实验
+仍关闭 speculative decoding，因为 MTP 会改变每次调度步接受的 token 数，
+使“128 输出 token 对应多少 decode step”不再稳定。
+
+每份结果至少附带：日期、机器型号、CPU/NUMA、910B4 数量、CANN、驱动、
+固件、PyTorch、`torch_npu`、vLLM、vLLM-Ascend、模型路径/版本、可见设备、
+TP/DP、所有环境变量和完整服务命令。
+
+## 2. 先统一“同步耗时”的定义
+
+关注的典型 API 包括：
+
+- `aclrtSynchronizeDevice`
+- `aclrtSynchronizeStream`
+- `aclrtSynchronizeEvent`
+- 对应的 `*WithTimeout`
+- timeline 中可能出现的低层 `rt*Synchronize*`
+- `torch_npu.npu.synchronize()` 等框架包装层
+
+这些接口的 Host wall time 可近似写成：
+
+```text
+T_sync_host_wall
+  = T_framework/runtime_on_cpu
+  + T_wait_prior_npu_work
+  + T_wait_hccl
+  + T_wait_copy_or_dma
+  + T_blocked
+  + T_runnable_but_not_scheduled
+  + T_wakeup_and_return
+```
+
+必须区分：
+
+1. **API wall/duration**：进入同步 API 到返回的墙钟时间。CANN API 统计和
+   timeline 的 `dur` 主要给出这个值。
+2. **on-CPU self time**：线程真正处于 Running 状态、在该函数及其不再展开的
+   子路径里执行指令的时间。需要 CPU sampling 或线程状态佐证。
+3. **等待时间**：API wall 减去 on-CPU 部分，可能在睡眠，也可能已经 Runnable
+   但暂时没有得到 CPU。
+
+因此，看到 `aclrtSynchronizeStream = 4 ms`，不能直接得出“CANN Runtime 消耗
+了 4 ms CPU”。它可能只用了几十微秒 CPU，剩余时间在等待 NPU kernel、HCCL、
+DMA 或 OS 唤醒。
+
+同一个同步调用还可能同时出现在 framework、`aclrt`、`rt` 三层。三层是嵌套
+关系，不能相加。配套汇总器按 `aclrt > rt > framework` 选择一个优先层作为
+非重复口径，同时保留各层和各线程明细。
+
+## 3. 容器与目录前提
+
+进入已经可部署模型的容器，确认：
+
+- 仓库目录已挂载或复制进容器；
+- 模型目录可读；
+- `artifacts/` 所在文件系统有足够空间；
+- NPU 设备、驱动和 CANN 环境在容器内可见；
+- `vllm serve`、`vllm bench serve`、`torch_npu` 均可用；
+- profiling 输出目录可写，且最终能从容器复制到持久存储。
+
+以下示例假设：
+
+```bash
+cd /workspace/ai-infra
+
+export MODEL=/models/Qwen3.6-27B-w8a8
+export MODEL_DIR=/models/Qwen3.6-27B-w8a8
+export OUTPUT_ROOT=/data/profile/qwen36_27b_w8a8
+export TP_SIZE=2
+export ASCEND_RT_VISIBLE_DEVICES=0,1
+```
+
+路径按容器实际挂载修改。不要把 profiler 输出写入容器临时层后直接退出容器。
+
+## 4. 预检：先证明“测的是预期模型和环境”
+
+### 4.1 采集系统信息
+
+在容器内执行：
+
+```bash
+bash labs/run_vllm_ascend_e2e_profile.sh system
+```
+
+输出位于 `${OUTPUT_ROOT}/system/`，包括 CPU、NUMA、NPU、vLLM、
+PyTorch/`torch_npu` 版本与关键环境变量。若容器内看不到拓扑命令，额外在宿主机
+采集 `npu-smi info`、`lscpu`、`numactl --hardware`，并和容器结果放在一起。
+
+### 4.2 校验本地 W8A8 checkpoint
+
+```bash
+MODEL_DIR="${MODEL_DIR}" \
+  bash labs/run_vllm_ascend_e2e_profile.sh verify-model
+```
+
+检查项包括：
+
+- `config.json` 的模型类型；
+- `quant_model_description.json` 是否存在 W8A8 描述；
+- safetensors 权重和索引是否存在。
+
+这只证明 checkpoint 元数据正确。还必须在服务日志中确认：
+
+- 加载的是预期路径和 revision；
+- `--quantization ascend` 生效；
+- 没有因为不支持算子而整体退回非预期路径；
+- 实际 TP/DP、可见 NPU 与预期一致。
+
+某些 BF16 算子仍然存在是正常现象，不能凭一个 BF16 kernel 判断“W8A8
+未生效”。
+
+## 5. 先测 profiler-off 服务基线
+
+Profiler 会引入额外事件记录、内存和文件写入，不能拿 profiler-on 的吞吐当
+生产基线。
+
+### 5.1 终端 A：使用现有容器启动服务
+
+```bash
+mkdir -p "${OUTPUT_ROOT}/logs"
+
+MODEL="${MODEL}" TP_SIZE=2 \
+  bash labs/run_vllm_ascend_e2e_profile.sh server-baseline \
+  2>&1 | tee "${OUTPUT_ROOT}/logs/server_baseline.log"
+```
+
+脚本的默认关键参数为：
+
+```text
+--quantization ascend
+--dtype bfloat16
+--tensor-parallel-size 2
+--data-parallel-size 1
+--max-model-len 2048
+--max-num-seqs 8
+--max-num-batched-tokens 8192
+--no-enable-prefix-caching
+```
+
+若现有可用启动命令还需要设备、模型实现、调度器或其他参数，直接追加在
+`server-baseline` 后。脚本会把这些参数追加到 `vllm serve`。先确认健康检查和
+一次真实请求成功，再进入压测。
+
+### 5.2 终端 B：预热和正式基线
+
+```bash
+export MODEL="${MODEL}"
+export OUTPUT_ROOT=/data/profile/qwen36_27b_w8a8
+
+bash labs/run_vllm_ascend_e2e_profile.sh warmup
+
+for run in 1 2 3 4 5; do
+  BENCHMARK_LABEL="baseline_run${run}" \
+    bash labs/run_vllm_ascend_e2e_profile.sh benchmark
+done
+```
+
+记录五轮的中位数和 p95，不只保留最好的一轮。重点观察：
+
+- request throughput；
+- output token throughput；
+- TTFT；
+- TPOT/ITL；
+- E2E latency；
+- 五轮抖动。
+
+完成后停止 baseline 服务，再启动 profiler 服务，避免端口和显存冲突。
+
+## 6. Full：采集 1024→128 端到端 timeline
+
+### 6.1 终端 A：启动可动态控制的 profiler 服务
+
+每个实验使用独立 `PROFILE_LABEL`。Profiler 输出路径在服务启动时已固定，因此
+换 full/control/A/B 时应重启服务。
+
+```bash
+export PROFILE_LABEL=full_bs8_1024_128
+
+MODEL="${MODEL}" TP_SIZE=2 PROFILE_LABEL="${PROFILE_LABEL}" \
+  bash labs/run_vllm_ascend_e2e_profile.sh server-profile \
+  2>&1 | tee "${OUTPUT_ROOT}/logs/server_${PROFILE_LABEL}.log"
+```
+
+脚本给 vLLM 增加动态 profiler 配置：
+
+```json
+{
+  "profiler": "torch",
+  "torch_profiler_dir": ".../torch_profile/full_bs8_1024_128",
+  "torch_profiler_with_stack": false,
+  "torch_profiler_record_shapes": false,
+  "torch_profiler_with_memory": false
+}
+```
+
+关闭 stack、shape 和 memory 是为了降低采集扰动。若后续确实要定位 Python
+调用栈，单独用 `TORCH_PROFILER_WITH_STACK=true` 重启并只采很短窗口。
+
+### 6.2 终端 B：先预热，再只包围正式请求
+
+```bash
+export OUTPUT_ROOT=/data/profile/qwen36_27b_w8a8
+export PROFILE_LABEL=full_bs8_1024_128
+export INPUT_TOKENS=1024
+export OUTPUT_TOKENS=128
+export CONCURRENCY=8
+
+bash labs/run_vllm_ascend_e2e_profile.sh warmup
+bash labs/run_vllm_ascend_e2e_profile.sh profile
+```
+
+`vllm bench serve --profile` 会在正式请求前后调用服务的 `/start_profile` 与
+`/stop_profile`。这样模型加载和大部分预热不会污染窗口。
+
+请求配置为：
+
+```text
+random dataset
+exact input length = 1024
+exact requested output length = 128
+num prompts = 8
+max concurrency = 8
+request rate = inf
+ignore EOS
+temperature = 0
+```
+
+等待终端 A 明确完成 stop/flush 后再停止服务。提前杀进程可能留下不完整 JSON。
+
+### 6.3 解析 CANN profiler 输出
+
+```bash
+PROFILE_LABEL=full_bs8_1024_128 \
+ANALYSIS_LABEL=full_bs8_1024_128 \
+OUTPUT_TOKENS=128 \
+  bash labs/run_vllm_ascend_e2e_profile.sh analyze
+```
+
+该动作对每个 `*_ascend_pt` 目录执行 `torch_npu.profiler.analyse()`，再从
+`ASCEND_PROFILER_OUTPUT/trace_view.json` 汇总同步 API，结果写入：
+
+```text
+artifacts/vllm_ascend_e2e/
+├── system/
+├── logs/
+├── results/
+│   └── profile_full_bs8_1024_128.json
+├── torch_profile/
+│   └── full_bs8_1024_128/
+│       └── ..._ascend_pt/
+│           └── ASCEND_PROFILER_OUTPUT/
+│               ├── trace_view.json
+│               ├── api_statistic.csv
+│               ├── kernel_details.csv
+│               ├── operator_details.csv
+│               ├── op_statistic.csv
+│               └── step_trace_time.csv
+└── analysis/
+    └── full_bs8_1024_128/
+        ├── ascend_sync_summary.json
+        └── trace-files.txt
+```
+
+不同 CANN/`torch_npu` 版本的文件名可能有差异；以实际生成文件为准并保留原始
+目录。
+
+## 7. Control：采集 1024→1，分离 Prefill 和 Decode
+
+Full 包含请求调度、tokenize、Prefill、128 个输出 token、Detokenize 和返回。
+要估计持续 Decode 的同步成本，需要保持输入和并发不变，只把输出改为 1。
+
+停止 Full 服务，然后重启：
+
+```bash
+export PROFILE_LABEL=prefill_control_bs8_1024_1
+export OUTPUT_TOKENS=1
+
+MODEL="${MODEL}" TP_SIZE=2 \
+  bash labs/run_vllm_ascend_e2e_profile.sh server-profile \
+  2>&1 | tee "${OUTPUT_ROOT}/logs/server_${PROFILE_LABEL}.log"
+```
+
+另一个终端执行：
+
+```bash
+export PROFILE_LABEL=prefill_control_bs8_1024_1
+export OUTPUT_TOKENS=1
+
+bash labs/run_vllm_ascend_e2e_profile.sh warmup
+bash labs/run_vllm_ascend_e2e_profile.sh profile
+
+ANALYSIS_LABEL=prefill_control_bs8_1024_1 \
+  bash labs/run_vllm_ascend_e2e_profile.sh analyze
+```
+
+两次采集必须保持模型、TP、并发、输入、缓存设置和 profiler 配置一致。对同一
+TP rank/worker、同一 API 层，近似：
+
+```text
+持续 Decode 同步 Host wall / batch step
+  ≈ (Full_sync_wall - Control_sync_wall) / 127
+
+持续 Decode 同步 Host wall / generated token
+  ≈ (Full_sync_wall - Control_sync_wall) / (8 × 127)
+```
+
+这里的 127 是 Full 相比 1024→1 多出的生成迭代。该差分仍是近似值：
+Continuous Batching、请求完成时刻和 hybrid model 的执行模式可能使各步不完全
+同构。至少重复三次，报告中位数和范围。
+
+TP rank 可能并行等待。**各 rank 的同步时长之和不是请求关键路径**。关键路径
+优先看同一时段各 rank 的最大值及端到端 E2E/TPOT，再把 rank sum 作为 Host
+资源消耗的辅助统计。
+
+## 8. Timeline 用什么看、具体怎么看
+
+首选 MindStudio Insight 打开 `trace_view.json`；快速共享也可使用 Perfetto UI。
+`api_statistic.csv` 适合排序统计，不能代替 timeline 的因果关系。
+
+推荐查看顺序：
+
+1. 先用压测结果确定整个 8 请求窗口和 TTFT/TPOT。
+2. 在 timeline 找一次 Prefill，再找稳态 Decode 的连续若干步。
+3. 展开 API server/EngineCore/scheduler、worker/TP rank、Python/PTA、
+   CANN Runtime、NPU kernel、HCCL 和 memcpy 轨道。
+4. 搜索 `Synchronize`，定位
+   `aclrtSynchronizeDevice/Stream/Event` 及低层 `rt*`。
+5. 对每个长同步区间，纵向查看同一时间 NPU/HCCL/memcpy 正在做什么。
+6. 若有 CPU thread state，检查线程是 Running、Sleeping 还是
+   Runnable/Ready；没有则使用下一节的 CPU 采样补证。
+
+典型判读：
+
+| 长同步区间同时出现什么 | 优先假设 | 下一步验证 |
 |---|---|---|
-| PyTorch 后端 | `torch.cuda` | `torch_npu.npu` / `torch.npu` |
-| Device | `cuda:0` | `npu:0` |
-| 执行栈 | ATen CUDA → CUDA Runtime/Driver | ATen → torch_npu/PTA → CANN Runtime/AscendCL → Driver |
-| Stream | `torch.cuda.Stream` | `torch_npu.npu.Stream` |
-| Event | `torch.cuda.Event` | `torch_npu.npu.Event` |
-| 主机异步 copy | pinned + `non_blocking=True` | pinned + `non_blocking=True` |
-| 自定义打点 | NVTX | mstx，旧资料称 msproftx |
-| 框架 timeline | PyTorch Profiler | Ascend PyTorch Profiler |
-| 系统 timeline | Nsight Systems | `msprof` + MindStudio Insight |
-| 设备状态 | `nvidia-smi` | `npu-smi` |
-| GPU/NPU 间互联 | NVLink/NVSwitch | HCCS |
-| Host↔Device 链路 | PCIe | 典型 EP 模式为 PCIe |
+| 连续 NPU kernel | 等待前序 NPU 计算完成 | 看 kernel 类型、排队深度和 graph/task queue |
+| HCCL 通信 | 等待 TP collective | 检查 rank 不平衡、HCCS/PCIe 拓扑、TP A/B |
+| Memcpy/H2D/D2H | 等待 DMA/搬运 | 检查方向、大小、pinned/NUMA，再做 copy 微基准 |
+| NPU 已完成，线程 Sleeping | Runtime 阻塞/唤醒尾部 | 对齐 API return、futex/调度事件 |
+| NPU 已完成，线程 Runnable | CPU 争用或绑核问题 | 看 run-queue、CPU affinity、上下文切换 |
+| NPU 空闲，Host 线程 Running | Python/PTA/CANN 下发或锁 | CPU flame graph、任务队列、graph mode |
+| 多个 rank 同步尾部差异大 | 慢 rank/负载不均成为屏障 | 按 rank 对齐 kernel、HCCL 和 NUMA |
 
-`torch_npu` 当前支持 `Stream`、`Event` 和 `Event.elapsed_time`，因此实验能保持
-与 CUDA 版本相同的五层指标语义。
+不要仅凭颜色判断。点开事件，确认：
 
-## 3. 910B4 H2D 完整流程
+- 完整 API 名称；
+- `pid/tid` 与 TP rank；
+- start/end/duration；
+- args/correlation id；
+- 是否存在外层 framework 和内层 `aclrt/rt` 的嵌套；
+- 相同区间的 NPU、HCCL、Memcpy 活动。
 
-```mermaid
-sequenceDiagram
-    participant P as "Python / 推理 Scheduler"
-    participant PT as "PyTorch Dispatcher"
-    participant TN as "torch_npu / PTA"
-    participant Q as "Task Queue 二级流水"
-    participant C as "CANN Runtime / AscendCL"
-    participant D as "Driver + PCIe DMA"
-    participant N as "NPU Stream / Device Memory"
+Chrome trace 通常以微秒表示 `dur`。若某版本输出异常大/小，先手工比对一个事件
+的时间轴刻度，再给汇总器传 `--duration-unit ns` 或 `ms`，不要盲目换算。
 
-    P->>P: "组 batch、准备 token / metadata"
-    P->>PT: "dst.copy_(src, non_blocking=True)"
-    PT->>TN: "选择 npu:0、dtype、layout、stream"
-    alt "pageable host memory"
-        TN->>TN: "驻留 / staging / 可能退化为同步"
-    else "pinned host memory"
-        TN->>TN: "使用可 DMA 的 page-locked buffer"
-    end
-    TN->>Q: "enqueue copy task"
-    Q-->>P: "Host API 可以先返回"
-    Q->>C: "二级流水下发 Runtime task"
-    C->>D: "提交 Host-to-Device copy"
-    D->>N: "经 PCIe 写入 Device memory"
-    N->>N: "NPU Event 完成"
-    N->>N: "依赖输入的后续算子可执行"
+## 9. 如何得到真正的 CPU on-CPU self time
+
+Ascend profiler 的 API duration 回答“Host 调用多久返回”，不是“函数实际烧了
+多少 CPU”。要进一步拆解，在相同 workload 下做一轮短的 CPU sampling。
+
+容器有权限、能看到服务 PID 且安装了 `perf` 时，可在请求窗口采集：
+
+```bash
+mkdir -p "${OUTPUT_ROOT}/cpu"
+
+perf record -F 99 -g -p <vllm-worker-pid> \
+  -o "${OUTPUT_ROOT}/cpu/perf.data" -- sleep 30
+
+perf report --stdio \
+  -i "${OUTPUT_ROOT}/cpu/perf.data" \
+  > "${OUTPUT_ROOT}/cpu/perf-report.txt"
 ```
 
-需要区分：
+若要看阻塞与唤醒，优先在宿主机使用能看到容器线程的 PID，并在获准后采集
+`sched_switch`/`sched_wakeup` 或等价 eBPF 数据。容器通常需要额外
+`perf_event`、BPF、host PID namespace 权限；不要为了采集临时修改生产容器
+权限。
 
-1. **Python prepare**：请求调度、metadata packing、CPU tensor 写入。
-2. **PyTorch/torch_npu host API**：dispatcher、格式与 device 检查。
-3. **task queue**：主线程与二级下发线程之间的队列和唤醒。
-4. **CANN Runtime API**：真正向设备 runtime 提交任务。
-5. **stream queue**：等待同 stream 的前序算子或 copy。
-6. **PCIe DMA**：Host memory 与 Device memory 之间的数据搬运。
-7. **NPU consumer**：模型算子消费刚传入的数据。
-
-`host_api_ms` 很短，只能证明主线程很快离开 `copy_()`，不能证明 task queue
-没有积压，也不能证明 DMA 已经完成。
-
-## 4. 910B4 D2H 完整流程
-
-```mermaid
-sequenceDiagram
-    participant N as "NPU 算子 / Stream"
-    participant C as "CANN Runtime"
-    participant Q as "torch_npu Task Queue"
-    participant M as "Pinned Host Buffer"
-    participant P as "Python Output Processor"
-
-    N->>N: "生成 sampled token / logits / KV"
-    N->>C: "满足 producer event"
-    Q->>C: "提交 D2H copy task"
-    C->>M: "经 PCIe 写入 Host buffer"
-    C->>N: "D2H Event 完成"
-    P->>N: "event.synchronize / stream.synchronize"
-    P->>M: "读取 token、detokenize、序列化"
-```
-
-D2H 常落在 decode 的用户可见关键路径：
+分析口径：
 
 ```text
-NPU forward / sampler
-→ producer event
-→ D2H
-→ Host wait 被唤醒
-→ Python 读取
-→ detokenize / 网络发送
+同步 API 内 on-CPU self
+  = CPU samples 落在 aclrt/rt synchronize 路径的比例
+    × 采样窗口内目标线程 on-CPU 时间
+
+同步 API 内 off-CPU wait
+  ≈ timeline API wall - 对齐区间内 on-CPU time
 ```
 
-以下操作可能把同步成本隐藏到后一个位置：
+Sampling 是统计估计。99 Hz 对几十微秒函数分辨率有限：增加重复次数、拉长稳态
+窗口，而不是直接把频率升得很高。Python `cProfile` 只看到 Python 调用关系，
+无法区分 native blocking 和 OS 调度，不能单独作为结论。
 
-- `.cpu()` 后立即读；
-- `.item()`；
-- 打印 NPU tensor；
-- 转 NumPy；
-- output processor 直接访问尚未完成的 pinned buffer。
+建议同时保留：
 
-本实验会等待结束 Event 后再校验数据。
+- 每线程 CPU 利用率、上下文切换、run-queue；
+- CPU flame graph 或 `perf report`；
+- CPU affinity/NUMA；
+- 与 timeline 相同的开始/结束时间标记。
 
-## 5. 分层指标
+## 10. 从 `api_statistic.csv` 提取同步 API
 
-| 指标 | 910B4 测量方式 | 含义 |
-|---|---|---|
-| `cpu_prepare_ms` | Host monotonic clock | Python 准备和合成 work |
-| `host_api_ms` | `copy_()` 前后 Host clock | PyTorch/torch_npu 调用返回时间 |
-| `device_copy_ms` | 两个 NPU Event 的 `elapsed_time` | stream 上 copy 区间 |
-| `completion_ms` | submit 到 Event wait 返回 | queue、copy、同步唤醒的可见完成延迟 |
-| `pipeline_ms` | prepare 到完成 | 单次关键路径或 batch 摊销时间 |
-| `device_copy_gbps_p50` | bytes / NPU Event time | Device 侧 copy 有效速率 |
-| `effective_gbps_p50` | bytes / pipeline time | 应用真正得到的端到端速率 |
+先确认表头，因为不同版本列名可能变化：
 
-对 910B4，可以进一步写成：
+```bash
+find "${PROFILE_DIR}" -path '*/ASCEND_PROFILER_OUTPUT/api_statistic.csv' \
+  -exec head -n 5 {} \;
+```
+
+在表格中筛选包含 `Synchronize` 的 API，至少输出：
+
+| rank/pid/tid | API | calls | total wall | avg | p50 | p95 | p99 | max |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+
+配套 JSON 还提供按 API 和 `pid/tid` 的统计。CSV 与 trace 结果不一致时依次检查：
+
+1. 是否统计了不同时间窗口；
+2. 是否把 framework、`aclrt`、`rt` 嵌套层相加；
+3. 是否把所有 TP rank 相加；
+4. 是否混入模型加载/预热；
+5. 是否使用了错误的时间单位；
+6. 是否有某个 rank 的 trace 缺失或未 flush。
+
+## 11. H2D/D2H、PCIe 和 DMA 何时才是主因
+
+在模型已经驻留 NPU 的稳态 Decode 中，不应预设每个 token 都有大规模权重
+H2D。只有 timeline 明确显示长同步与 memcpy 重叠时，才按以下链路追踪：
 
 ```text
-T_pipeline
-= T_python_prepare
- + T_torch_npu_api
- + T_task_queue
- + T_cann_runtime
- + T_stream_queue
- + T_pcie_dma
- + T_event_wait_and_host_wakeup
+Host tensor/元数据
+  → Python/PTA/CANN 下发
+  → Host 内存是否可 DMA
+  → DMA descriptor / copy engine
+  → PCIe/片内互联
+  → Device buffer
+  → 同步点等待 copy 完成
 ```
 
-如果只测 `copy_()`，会漏掉后六项中的大部分。
+需要逐项确认：
 
-## 6. 环境与拓扑检查
+- copy 方向与字节数；
+- pageable/pinned 或额外 staging copy；
+- Host 内存与目标 910B4 的 NUMA 距离；
+- 是否是 KV offload、采样结果回传、日志/指标或请求数据；
+- copy 与计算是否重叠；
+- 同步是否过早破坏异步流水。
 
-### 6.1 软件版本
-
-先加载部署环境对应的 CANN 环境脚本，再运行：
-
-```bash
-python3 - <<'PY'
-import torch
-import torch_npu
-
-print("torch:", torch.__version__)
-print("torch_npu:", torch_npu.__version__)
-print("CANN:", torch_npu.utils.get_cann_version())
-print("device:", torch_npu.npu.get_device_name(0))
-print("properties:", torch_npu.npu.get_device_properties(0))
-PY
-```
-
-PyTorch、`torch_npu`、CANN 必须来自兼容版本组合。不要在版本不匹配的环境下
-解释微秒级结果。
-
-### 6.2 NPU 与 PCIe 映射
-
-```bash
-npu-smi info
-npu-smi info -m
-npu-smi info -t topo
-lspci -tv
-lscpu
-numactl --hardware
-```
-
-记录：
-
-- `npu-smi` 与驱动版本；
-- NPU ID、Chip ID、Logic ID、Bus ID；
-- 910B4 所在 PCIe root complex；
-- NPU 对应的 NUMA node 和 CPU 列表；
-- 容器内 NPU ID 与物理机 ID 是否重新映射；
-- 当前进程 CPU affinity 和 cgroup CPU set。
-
-`npu-smi info -t topo` 在部分产品或容器环境可能不支持。此时用
-`npu-smi info` 的 Bus ID、`lspci` 与
-`/sys/bus/pci/devices/<BDF>/numa_node` 交叉确认。
-
-### 6.3 会改变测量语义的环境变量
-
-```bash
-env | rg 'ASCEND_LAUNCH_BLOCKING|TASK_QUEUE_ENABLE|CPU_AFFINITY_CONF|ASCEND.*VISIBLE'
-```
-
-基线建议：
-
-```bash
-export ASCEND_LAUNCH_BLOCKING=0
-export TASK_QUEUE_ENABLE=1
-unset CPU_AFFINITY_CONF
-```
-
-这些只是对照起点，不是所有生产模型的最佳配置。尤其不要在共享生产环境直接
-覆盖服务启动参数。
-
-## 7. 实验一：完整基线矩阵
+确认后才运行补充微基准：
 
 ```bash
 python3 labs/h2d_d2h_benchmark.py \
   --backend npu \
-  --device npu:0 \
-  --sizes 4KiB,1MiB,16MiB,64MiB,256MiB \
-  --warmup 20 \
-  --iterations 100 \
-  --allocation-iterations 5 \
-  --output-dir artifacts/ascend_h2d_d2h/baseline
+  --sizes 4KiB,1MiB,16MiB,64MiB \
+  --output-dir "${OUTPUT_ROOT}/copy_microbench"
 ```
 
-覆盖：
+微基准用于回答“链路能力/尺寸曲线是否异常”，不能替代端到端归因。
+
+## 12. 优化 A/B 顺序
+
+每个变量都应重启服务、重新预热，重复至少三次，并同时比较 profiler-off
+TTFT/TPOT/吞吐与 profiler-on timeline。
+
+### A. 先消除明显同步和 CPU 调度问题
+
+1. 找到业务代码或框架插件中不必要的显式 device/stream synchronize；
+2. 查看线程是否经常 Runnable 但得不到 CPU；
+3. 检查 vLLM worker 与 NPU/NUMA 亲和性；
+4. 核对当前 vLLM-Ascend 版本的 CPU binding 默认行为，不要盲目覆盖；
+5. 减少高频日志、同步指标和请求热路径上的 Python 工作。
+
+### B. Task Queue
+
+基线保持：
+
+```bash
+TASK_QUEUE_ENABLE=1
+ASCEND_LAUNCH_BLOCKING=0
+```
+
+诊断时可用 `TASK_QUEUE_ENABLE=0` 重启做一次 A/B。它会改变下发/同步行为，
+可能更易观察，但通常不是生产优化结论。不要使用
+`ASCEND_LAUNCH_BLOCKING=1` 的结果评估真实性能。
+
+### C. Graph mode
+
+按当前 vLLM-Ascend 版本支持的 graph 参数比较默认、full-decode graph 与 eager。
+关注 NPU 空洞、Host launch gap、同步调用次数和 TPOT，而不只看 kernel 总时长。
+
+### D. Async scheduling
+
+若版本和模型支持，比较 async scheduling 开/关。它可能减少调度阻塞，也可能
+改变 timeline 结构；必须保持 workload 与其他参数不变。
+
+### E. TP=2 与 TP=4
+
+只在模型内存或服务目标需要时比较。TP 增大可能减小单卡计算，但增加 HCCL
+collective 和同步屏障。若 TP 改变，结果不能用于单独证明“CPU 优化有效”。
+
+### F. MTP/speculative
+
+先完成 MTP 关闭的主实验，再按当前官方 Qwen3.6 配置单独测试 MTP。启用后应
+报告 accepted tokens、acceptance rate 和每 accepted token 成本，不能继续用
+`输出 token 数 - 1` 当作 decode step 数。
+
+### G. Profiler 选项
+
+- `with_stack=false`：主性能采集；
+- `with_stack=true`：短窗口定位调用栈；
+- profiler-off：最终性能判断。
+
+若 profiler-on/off 差异明显，缩短采集窗口、减少 stack/shape/memory 信息，
+不要用重采集结果代表生产。
+
+## 13. 结果表模板
+
+### 13.1 端到端指标
+
+| Run | Config | TTFT p50/p95 | TPOT p50/p95 | E2E p50/p95 | output tok/s |
+|---|---|---:|---:|---:|---:|
+| baseline-1 | profiler off |  |  |  |  |
+| baseline-2 | profiler off |  |  |  |  |
+| full | profiler on |  |  |  |  |
+| control | profiler on, output=1 |  | N/A |  |  |
+
+### 13.2 同步 API
+
+| Rank | API family | API | Calls | Total Host wall | p50 | p95 | p99 | Max |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| 0 | aclrt |  |  |  |  |  |  |  |
+| 1 | aclrt |  |  |  |  |  |  |  |
+
+### 13.3 归因
+
+| 长同步区间 | NPU/HCCL/Memcpy 重叠 | CPU 状态 | 结论 | 证据强度 |
+|---|---|---|---|---|
+|  |  | Running/Sleeping/Runnable |  | 强/中/弱 |
+
+结论建议写成：
+
+> 在固定的 1024→128、并发 8、TP=2 配置中，rank 0 的
+> `aclrtSynchronizeStream` p95 为 X；其中 Y% 区间与 HCCL 重叠，
+> Z% 在 NPU 已完成后仍处于 Runnable。关闭非必要 CPU 争用后，
+> profiler-off TPOT 中位数从 A 降到 B，重复三轮均成立。
+
+不要只写“同步很慢”或“应该是 PCIe”。
+
+## 14. 应上传/归档哪些数据
+
+每个 run 独立目录，至少保留：
+
+1. `${OUTPUT_ROOT}/system/` 全部文件；
+2. 模型 W8A8 验证 JSON；
+3. 完整 server log 和完整启动命令；
+4. `vllm bench serve` 的 result JSON；
+5. 每个 `*_ascend_pt` 原始目录；
+6. `ASCEND_PROFILER_OUTPUT/trace_view.json`；
+7. `api_statistic.csv`、`kernel_details.csv`、`operator_details.csv`、
+   `op_statistic.csv`、`step_trace_time.csv`；
+8. HCCL/communication 文件（如果生成）；
+9. `ascend_sync_summary.json` 与 `trace-files.txt`；
+10. CPU sampling、线程状态和 affinity 数据（如果采集）；
+11. profiler-off 五轮基线；
+12. 实验 README：机器、版本、时间、变量、异常和已知缺失。
+
+上传前检查日志和路径是否包含访问令牌、内部地址或敏感请求文本。模型权重本身
+通常不需要上传。
+
+可将结果目录压缩后从容器复制到持久存储；务必先停止 profiling 并确认 JSON
+可被解析。若数据量过大，最小审阅包为：
 
 ```text
-H2D / D2H
-× pageable / pinned
-× blocking / nonblocking
-× sync-each / sync-batch
+system/
+logs/
+results/
+analysis/
+每个 run 的 trace_view.json
+每个 run 的 api_statistic.csv
+每个 run 的 kernel_details.csv
+实验 README
 ```
 
-先检查：
-
-1. `summary.json` 中 `backend` 为 `npu`，并记录正确的 device/CANN/环境变量。
-2. pinned + nonblocking + batch 的大块有效带宽应进入相对稳定区。
-3. 小 copy 的 `device_copy_gbps_p50` 不用于和链路理论值比较。
-4. `host_api_ms`、`device_copy_ms` 和 `pipeline_ms` 不能被当成同一个指标。
-5. pageable 与 pinned 的差异可能出现在 Host API、Device Event 或两者之间。
-
-不要在没有对应服务器产品规格书的情况下给 910B4 设定统一 GB/s
-验收线。公开文档中的 `h2d_bw` 配置示例也不是当前机器的保证值。
-
-## 8. 实验二：Task Queue A/B
-
-`TASK_QUEUE_ENABLE` 是 910B4 CPU 下发性能分析里必须单独控制的变量。
-
-### Level 0：关闭 task queue
-
-```bash
-TASK_QUEUE_ENABLE=0 ASCEND_LAUNCH_BLOCKING=0 \
-python3 labs/h2d_d2h_benchmark.py \
-  --backend npu \
-  --sizes 4KiB,64MiB \
-  --iterations 200 \
-  --output-dir artifacts/ascend_h2d_d2h/task-queue-0
-```
-
-### Level 1：默认二级流水
-
-```bash
-TASK_QUEUE_ENABLE=1 ASCEND_LAUNCH_BLOCKING=0 \
-python3 labs/h2d_d2h_benchmark.py \
-  --backend npu \
-  --sizes 4KiB,64MiB \
-  --iterations 200 \
-  --output-dir artifacts/ascend_h2d_d2h/task-queue-1
-```
-
-### Level 2：进一步平衡一级/二级流水
-
-```bash
-TASK_QUEUE_ENABLE=2 ASCEND_LAUNCH_BLOCKING=0 \
-python3 labs/h2d_d2h_benchmark.py \
-  --backend npu \
-  --sizes 4KiB,64MiB \
-  --iterations 200 \
-  --output-dir artifacts/ascend_h2d_d2h/task-queue-2
-```
-
-看这些关系：
-
-- `host_api_ms` 是否下降；
-- `batch` effective bandwidth 是否提升；
-- `device_copy_ms` 是否基本不变；
-- task queue 中间是否出现大 gap；
-- p95/p99 是否改善；
-- Level 2 是否增加 Device memory 峰值。
-
-官方说明 Level 2 会迁移部分 workspace 工作并可能提高 NPU 内存峰值。不能只看
-吞吐，不看内存。
-
-### 同步负对照
-
-```bash
-ASCEND_LAUNCH_BLOCKING=1 \
-python3 labs/h2d_d2h_benchmark.py \
-  --backend npu \
-  --sizes 4KiB,64MiB \
-  --iterations 50 \
-  --output-dir artifacts/ascend_h2d_d2h/launch-blocking-debug
-```
-
-这组用于验证“异步提交是否被同步模式改变”。它会关闭 task queue、降低性能，
-不能和异步结果混合汇总。
-
-## 9. 实验三：Python、二级流水线程与 OS 调度
-
-### 9.1 Python prepare
-
-```bash
-python3 labs/h2d_d2h_benchmark.py \
-  --backend npu \
-  --sizes 4KiB,64MiB \
-  --python-work 50000 \
-  --iterations 200 \
-  --output-dir artifacts/ascend_h2d_d2h/python-work
-```
-
-如果 `cpu_prepare_ms` 和 copy 间 gap 上升而 `device_copy_ms` 稳定，说明是
-Host 供给不足，不是 PCIe DMA 本身变慢。
-
-### 9.2 GIL 竞争
-
-```bash
-python3 labs/h2d_d2h_benchmark.py \
-  --backend npu \
-  --sizes 4KiB,64MiB \
-  --interference gil \
-  --iterations 200 \
-  --output-dir artifacts/ascend_h2d_d2h/gil
-```
-
-### 9.3 OS 同核竞争
-
-先从实际拓扑选择一颗 NPU 本地 CPU，例如用 `<cpu>` 代替：
-
-```bash
-python3 labs/h2d_d2h_benchmark.py \
-  --backend npu \
-  --sizes 4KiB,64MiB \
-  --cpu-affinity <cpu> \
-  --interference cpu \
-  --cpu-workers 1 \
-  --iterations 200 \
-  --output-dir artifacts/ascend_h2d_d2h/os-contention
-```
-
-这会故意让主线程和 worker 争核，用于制造可重复的调度长尾。
-
-### 9.4 `CPU_AFFINITY_CONF`
-
-`torch_npu` 提供粗粒度和细粒度绑核：
-
-```bash
-CPU_AFFINITY_CONF=0 python3 labs/h2d_d2h_benchmark.py \
-  --backend npu --sizes 4KiB,64MiB \
-  --output-dir artifacts/ascend_h2d_d2h/affinity-0
-
-CPU_AFFINITY_CONF=1 python3 labs/h2d_d2h_benchmark.py \
-  --backend npu --sizes 4KiB,64MiB \
-  --output-dir artifacts/ascend_h2d_d2h/affinity-1
-
-CPU_AFFINITY_CONF=2 python3 labs/h2d_d2h_benchmark.py \
-  --backend npu --sizes 4KiB,64MiB \
-  --output-dir artifacts/ascend_h2d_d2h/affinity-2
-```
-
-细粒度模式会把 PTA 主线程、二级流水等热点线程锚定到不同 CPU。它可能减少
-抢占、cache miss 和 migration，但如果业务还有 tokenizer、HTTP、output、
-HCCL 或自定义线程，也可能因为核心不足而变差。
-
-自定义范围示例：
-
-```bash
-export CPU_AFFINITY_CONF=2,npu0:<local-start>-<local-end>
-```
-
-不要同时用不一致的 `taskset`、`--cpu-affinity` 和 `CPU_AFFINITY_CONF`
-做正式对照；先选一种控制方式。
-
-## 10. 实验四：NUMA
-
-根据 `npu-smi info -t topo`、Bus ID 和 `lscpu` 选择本地/远端 node：
-
-```bash
-numactl --cpunodebind=<local> --membind=<local> \
-python3 labs/h2d_d2h_benchmark.py \
-  --backend npu \
-  --sizes 64MiB,256MiB \
-  --host-memory pinned \
-  --modes nonblocking \
-  --iterations 100 \
-  --output-dir artifacts/ascend_h2d_d2h/numa-local
-
-numactl --cpunodebind=<remote> --membind=<remote> \
-python3 labs/h2d_d2h_benchmark.py \
-  --backend npu \
-  --sizes 64MiB,256MiB \
-  --host-memory pinned \
-  --modes nonblocking \
-  --iterations 100 \
-  --output-dir artifacts/ascend_h2d_d2h/numa-remote
-```
-
-必须同时控制 CPU 和 memory policy。只把 Python 主线程绑到本地核，不能保证
-pinned buffer 也分配在本地 NUMA node。
-
-## 11. 实验五：Ascend PyTorch Profiler
-
-### H2D
-
-```bash
-python3 labs/h2d_d2h_benchmark.py \
-  --backend npu \
-  --sizes 64MiB \
-  --host-memory pinned \
-  --modes nonblocking \
-  --sync-policies each \
-  --iterations 20 \
-  --trace \
-  --trace-direction h2d \
-  --trace-size 64MiB \
-  --trace-iterations 20 \
-  --output-dir artifacts/ascend_h2d_d2h/torch-profiler-h2d
-```
-
-### D2H
-
-```bash
-python3 labs/h2d_d2h_benchmark.py \
-  --backend npu \
-  --sizes 64MiB \
-  --host-memory pinned \
-  --modes nonblocking \
-  --sync-policies each \
-  --iterations 20 \
-  --trace \
-  --trace-direction d2h \
-  --trace-size 64MiB \
-  --trace-iterations 20 \
-  --output-dir artifacts/ascend_h2d_d2h/torch-profiler-d2h
-```
-
-脚本会使用：
-
-```text
-torch_npu.profiler.ProfilerActivity.CPU
-torch_npu.profiler.ProfilerActivity.NPU
-torch_npu.profiler._ExperimentalConfig(mstx=True)
-```
-
-旧版 `torch_npu` 参数名是 `msprof_tx`，脚本会自动回退。
-
-在 timeline/MindStudio Insight 中对齐：
-
-1. `cpu_prepare`；
-2. `device_submit`；
-3. PyTorch `aten::copy_`；
-4. PTA/task queue 下发线程；
-5. CANN Runtime copy API；
-6. NPU 上对应的 H2D/D2H task；
-7. `completion_wait`；
-8. Host thread state。
-
-不同 CANN 版本的 copy task 名称可能不同，不要只靠字符串搜索。应从同一
-mstx range 横向关联 framework、CANN 和 Ascend Hardware 层。
-
-## 12. 实验六：`msprof` 系统 timeline
-
-```bash
-msprof \
-  --output=artifacts/ascend_h2d_d2h/msprof \
-  --msproftx=on \
-  --sys-profiling=on \
-  --sys-pid-profiling=on \
-  --sys-interconnection-profiling=on \
-  python3 labs/h2d_d2h_benchmark.py \
-    --backend npu \
-    --sizes 4KiB,64MiB \
-    --iterations 20 \
-    --warmup 5 \
-    --annotate \
-    --output-dir artifacts/ascend_h2d_d2h/msprof-run
-```
-
-关键产物随版本略有差异，通常包括：
-
-- `msprof_*.json` 或 `.db`：MindStudio Insight timeline；
-- `msprof_tx_*.json/csv`：mstx 打点；
-- `api_statistic_*.csv`：CANN API；
-- `pcie_*.csv`：PCIe 系统采样；
-- CPU/process usage；
-- `ASCEND_PROFILER_OUTPUT` 下的 operator、memory、framework 数据。
-
-`--sys-interconnection-profiling=on` 在 Atlas A2/Atlas 800I A2 场景可采集
-PCIe、HCCS 和片间带宽。判读时：
-
-- H2D/D2H 对齐 PCIe 层；
-- NPU↔NPU/HCCL 对齐 HCCS；
-- 不要把 HCCS 峰值当 Host copy 带宽；
-- PCIe 层采样周期通常比单次小 copy 粗，不能替代 NPU Event；
-- `msprof` 不能提供完整 Python 调用栈时，用 Ascend PyTorch Profiler 和
-  `perf` 补齐。
-
-## 13. 实验七：Host 调度、中断与 page fault
-
-### `perf stat`
-
-```bash
-perf stat \
-  -e task-clock,context-switches,cpu-migrations,page-faults,minor-faults,major-faults \
-  -o artifacts/ascend_h2d_d2h/perf-stat.txt \
-  python3 labs/h2d_d2h_benchmark.py \
-    --backend npu \
-    --sizes 4KiB,64MiB \
-    --iterations 200 \
-    --output-dir artifacts/ascend_h2d_d2h/perf-run
-```
-
-### `perf sched`
-
-```bash
-perf sched record -o artifacts/ascend_h2d_d2h/perf-sched.data -- \
-  python3 labs/h2d_d2h_benchmark.py \
-    --backend npu \
-    --sizes 4KiB \
-    --iterations 500 \
-    --output-dir artifacts/ascend_h2d_d2h/perf-sched-run
-
-perf sched timehist -i artifacts/ascend_h2d_d2h/perf-sched.data \
-  > artifacts/ascend_h2d_d2h/perf-sched-timehist.txt
-```
-
-关注的不只是 Python 主线程，还包括 PTA/task queue 二级流水线程。典型问题：
-
-- 主线程能 enqueue，但二级流水线程长期 runnable 未运行；
-- 主线程与下发线程被绑在同一颗繁忙 CPU；
-- NPU 本地 CPU 被 NIC/NVMe/driver IRQ 抢占；
-- event 完成后 output thread 被唤醒但迟迟没获得 CPU；
-- pinned buffer 首次触碰产生 page fault；
-- CPU migration 导致 cache/TLB locality 变差。
-
-脚本也会把当前进程 context switch/page fault 和全机 `/proc/interrupts`、
-`/proc/softirqs` 差值写入 `summary.json`。IRQ 是全机相关性证据，不是进程归因。
-
-## 14. 一键采集
-
-在 910B4 服务器、已经加载 CANN 环境的仓库根目录运行：
-
-```bash
-bash labs/run_ascend_h2d_d2h_validation.sh \
-  artifacts/ascend_h2d_d2h_validation
-```
-
-它会：
-
-1. 保存 `npu-smi`、映射、拓扑、CPU 和 NUMA 信息；
-2. 保存 PyTorch/`torch_npu`/CANN/device 信息；
-3. 跑完整 NPU 基线矩阵；
-4. 分别导出 H2D、D2H 的 Ascend PyTorch Profiler trace；
-5. 安装 `msprof` 时采集 mstx、Host、process、PCIe/HCCS 系统 timeline；
-6. 安装 `perf` 时采集 Host 调度计数。
-
-## 15. 结果判读
-
-| 观察 | 更可能的原因 | 下一步 |
-|---|---|---|
-| `host_api_ms` 高、`device_copy_ms` 正常 | 同步 copy、pageable staging、task queue 关闭、Host 被抢占 | pinned；检查 blocking 与环境变量；看 Host stack |
-| Host API 快、task queue 到 CANN 有大 gap | 二级流水线程调度不足或队列积压 | `CPU_AFFINITY_CONF` A/B；看 PTA thread state |
-| `device_copy_ms` 正常、`pipeline_ms` 尾部高 | queue、Event wait 唤醒、Python/OS 调度 | `perf sched`、mstx、completion wait |
-| 大块 `device_copy_ms` 变长 | PCIe/NUMA/DDR、并发 copy、链路争用 | PCIe layer、NUMA A/B、同机进程 |
-| Level 2 吞吐提高但内存峰值增加 | workspace 下发迁移带来的并发 | 同时检查 NPU memory 与业务余量 |
-| `ASCEND_LAUNCH_BLOCKING=1` 后 Host API 激增 | 异步提交被强制同步，符合预期 | 恢复 0 做正式性能测试 |
-| p50 正常、p99 与 context switch 同时升高 | Host 线程抢占、CPU migration、IRQ | 本地核隔离和 affinity A/B |
-| `pcie_*.csv` 很忙但单次 Event 正常 | 系统同时存在其他 PCIe 流量或采样太粗 | 对齐精确时间窗和进程 |
-| HCCS 很忙、H2D 正常 | NPU 间通信压力，不是 Host copy | 分开 HCCL/HCCS 与 H2D 根因 |
-
-## 16. 映射到真实推理服务
-
-在 MindIE、vLLM Ascend、SGLang Ascend 或自研服务中，至少添加：
-
-```text
-request/batch_id
-  cpu_schedule_begin/end
-  metadata_pack_begin/end
-  h2d_submit_begin/end
-  h2d_npu_event
-  task_queue_enqueue/dequeue（框架可观测时）
-  model_execute_begin/end
-  d2h_submit_begin/end
-  d2h_npu_event
-  output_cpu_consume_begin/end
-```
-
-每个 batch 关联：
-
-- prefill/decode phase；
-- sequence/token 数；
-- H2D/D2H 字节数；
-- pageable/pinned；
-- stream 与 Event；
-- `TASK_QUEUE_ENABLE`、`ASCEND_LAUNCH_BLOCKING`；
-- Host 主线程与二级流水线程 ID/CPU；
-- NPU/NUMA/Bus ID；
-- TTFT、ITL、TPOT。
-
-这样才能区分：
-
-```text
-Python 没准备好
-vs task queue 没及时下发
-vs CANN/stream 前序依赖
-vs PCIe copy 真正变慢
-vs Event 完成后 Host 没及时被调度
-```
-
-## 17. 实验纪律
-
-- profiler 与无 profiler 数字分开；
-- 每次只改一个变量；
-- `ASCEND_LAUNCH_BLOCKING=1` 只作为调试负对照；
-- task queue 0/1/2 分目录保存；
-- affinity 0/1/2 分目录保存；
-- 同时记录 CANN、驱动、固件、PyTorch 和 `torch_npu`；
-- 保留原始样本，比较 p50/p95/p99；
-- 小 copy 看固定开销，大 copy 看稳态；
-- PCIe sampling、NPU Event、Host clock 三种证据互相校验；
-- microbenchmark 解释机制，最终仍需在真实 decode/prefill 请求中关联 TTFT/ITL。
-
-## 18. 官方参考
-
-- [昇腾产品形态与 EP/RC、Host/Device 定义](https://www.hiascend.com/document/detail/en/mindstudio/700/Referenceinformation/productdescription/hardwaredesc_0001.html)
-- [MindIE Torch：同步/异步数据拷贝与 pinned memory](https://www.hiascend.com/document/detail/zh/mindie/10RC3/mindietorch/Torchdev/mindie_torch0016.html)
-- [Ascend Extension for PyTorch：Stream/Event API 支持](https://www.hiascend.com/document/detail/zh/Pytorch/720/apiref/PyTorchNativeapi/ptaoplist_000163.html)
-- [Ascend PyTorch Profiler 数据采集](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/900/devaids/Profiling/atlasprofiling_16_0033.html)
-- [mstx 自定义打点](https://www.hiascend.com/document/detail/en/canncommercial/850/devaids/profiling/atlasprofiling_16_0033.html)
-- [`msprof` 通用采集命令](https://www.hiascend.com/document/detail/en/canncommercial/850/devaids/profiling/atlasprofiling_16_0010.html)
-- [Atlas A2/800I A2 的 PCIe/HCCS 系统采集](https://www.hiascend.com/document/detail/en/canncommercial/850/devaids/profiling/atlasprofiling_16_0012.html)
-- [`ASCEND_LAUNCH_BLOCKING`](https://www.hiascend.com/document/detail/zh/Pytorch/710/comref/Envvariables/Envir_006.html)
-- [`TASK_QUEUE_ENABLE`](https://www.hiascend.com/document/detail/zh/Pytorch/710/comref/Envvariables/Envir_007.html)
-- [`CPU_AFFINITY_CONF`](https://www.hiascend.com/document/detail/zh/Pytorch/720/comref/Envvariables/Envir_033.html)
-- [`npu-smi info -t topo`](https://www.hiascend.com/document/detail/zh/Atlas%20200I%20A2/2550/re/npu/topic_0000002481546284.html)
+但要做完整二次分析，仍建议保留整个 `*_ascend_pt`。
+
+## 15. 完成标准
+
+实验只有同时满足以下条件才算完成：
+
+- checkpoint 元数据和服务日志均证明 W8A8 路径；
+- profiler-off 基线稳定；
+- Full 和 Control 使用独立目录、相同核心配置；
+- timeline 同时覆盖 Host API、NPU kernel、HCCL 和 memcpy；
+- 同步 API 没有跨嵌套层或跨 TP rank错误求和；
+- Host wall 与 on-CPU self 明确分开；
+- 至少一个优化 A/B 用 profiler-off 指标验证；
+- 原始 trace、统计表、日志、版本和实验配置可复查。
+
+## 16. 官方资料
+
+- [vLLM-Ascend：Qwen3.5-27B / Qwen3.6-27B 部署教程](https://docs.vllm.ai/projects/ascend/en/v0.24.0rc/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.html)
+- [vLLM-Ascend：Service Profiling Guide](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/performance_and_debug/service_profiling_guide.html)
+- [vLLM-Ascend：Supported Models](https://docs.vllm.ai/projects/ascend/en/main/user_guide/support_matrix/supported_models.html)
+- [vLLM-Ascend：CPU Binding](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/cpu_binding.html)
+- [vLLM-Ascend：Graph Mode](https://docs.vllm.ai/projects/ascend/en/main/user_guide/feature_guide/graph_mode.html)
+- [vLLM-Ascend：Performance Benchmark](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/performance_and_debug/performance_benchmark.html)
+- [CANN Runtime：Synchronization Management](https://www.hiascend.com/document/detail/en/canncommercial/850/API/appdevgapi/aclcppdevg_03_0020.html)
+- [Qwen3.6-27B model card](https://huggingface.co/Qwen/Qwen3.6-27B)
