@@ -21,6 +21,8 @@
    分析 Qwen3.6-27B-W8A8 端到端同步等待。
 7. 分析 A100 INT8 W8A8 真实 vLLM 推理中的 CUDA 同步等待，使用
    [`docs/06-vllm-cuda-sync-profiling.md`](docs/06-vllm-cuda-sync-profiling.md)。
+8. 对 vLLM 0.26 做阻塞/轮询、CPU self time、绑核、GIL、OS 调度和 IRQ A/B，使用
+   [`docs/07-vllm-cpu-selftime-experiments.md`](docs/07-vllm-cpu-selftime-experiments.md)。
 
 ## 学习网站
 
@@ -49,7 +51,8 @@ npm run dev
 │   ├── 03-official-reading-list.md
 │   ├── 04-h2d-d2h-profiling.md
 │   ├── 05-ascend-910b4-h2d-d2h-profiling.md
-│   └── 06-vllm-cuda-sync-profiling.md
+│   ├── 06-vllm-cuda-sync-profiling.md
+│   └── 07-vllm-cpu-selftime-experiments.md
 ├── labs/
 │   ├── h2d_d2h_benchmark.py
 │   ├── summarize_ascend_sync.py
@@ -59,6 +62,10 @@ npm run dev
 │   ├── run_h2d_d2h_validation.sh
 │   ├── run_vllm_ascend_e2e_profile.sh
 │   ├── run_vllm_cuda_sync_profile.sh
+│   ├── run_vllm_cpu_experiments.sh
+│   ├── analyze_nsys_sqlite.py
+│   ├── analyze_torch_trace_cpu.py
+│   ├── summarize_cpu_probes.py
 │   ├── kv_cache_calculator.py
 │   ├── scheduler_simulator.py
 │   ├── prefix_cache_simulator.py
@@ -81,6 +88,8 @@ make lab-h2d-d2h
 make lab-vllm-ascend-e2e
 # 真实 vLLM CUDA 同步 API profiling：
 bash labs/run_vllm_cuda_sync_profile.sh --help
+# vLLM CPU self time、等待策略、绑核、调度与 IRQ 实验：
+make lab-vllm-cpu
 ```
 
 ## 学习原则

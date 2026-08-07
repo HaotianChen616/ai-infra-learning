@@ -1,4 +1,4 @@
-.PHONY: test lab-kv lab-scheduler lab-prefix lab-h2d-d2h lab-h2d-d2h-ascend lab-vllm-ascend-e2e
+.PHONY: test lab-kv lab-scheduler lab-prefix lab-h2d-d2h lab-h2d-d2h-ascend lab-vllm-ascend-e2e lab-vllm-cpu
 
 PYTHON ?= python3
 
@@ -31,3 +31,6 @@ lab-h2d-d2h-ascend:
 
 lab-vllm-ascend-e2e:
 	bash labs/run_vllm_ascend_e2e_profile.sh --help
+
+lab-vllm-cpu:
+	bash labs/run_vllm_cpu_experiments.sh --help

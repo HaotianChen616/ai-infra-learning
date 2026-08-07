@@ -788,3 +788,7 @@ profiler:
 - [LLM Compressor：量化方案选择](https://docs.vllm.ai/projects/llm-compressor/en/stable/steps/choosing-scheme/)
 - [Nsight Systems CUDA API summary/trace](https://docs.nvidia.com/nsight-systems/AnalysisGuide/index.html)
 - [Nsight Systems CUDA trace、thread state 与 backtrace](https://docs.nvidia.com/nsight-systems/UserGuide/index.html)
+
+若下一步需要比较 `blocking`、active wait、Python polling、hybrid wait，并把同步
+wall time 与真正的 on-CPU self、OS 调度、NUMA、IRQ 分开，继续执行
+[`07-vllm-cpu-selftime-experiments.md`](07-vllm-cpu-selftime-experiments.md)。
