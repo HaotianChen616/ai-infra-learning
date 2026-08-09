@@ -47,12 +47,30 @@ def flatten(payload: dict[str, Any]) -> dict[str, float]:
                     row["share_pct"]
                 )
     if "by_analysis_category" in payload:
-        metrics["torch_trace.summed_cpu_self_wall_ms"] = float(
-            payload.get("summed_cpu_self_wall_ms", 0)
+        metrics["torch_trace.total_self_cpu_ms"] = float(
+            payload.get(
+                "total_self_cpu_ms",
+                payload.get("summed_cpu_self_wall_ms", 0),
+            )
         )
+        normalization = payload.get("normalization", {})
+        for name in (
+            "self_cpu_ms_per_request",
+            "self_cpu_ms_per_decode_step",
+        ):
+            value = normalization.get(name)
+            if value is not None:
+                metrics[f"torch_trace.{name}"] = float(value)
         for row in payload.get("by_analysis_category", []):
             category = row["category"]
             metrics[f"torch_self.{category}.ms"] = float(row["self_wall_ms"])
+            for name, suffix in (
+                ("self_cpu_ms_per_request", "ms_per_request"),
+                ("self_cpu_ms_per_decode_step", "ms_per_decode_step"),
+            ):
+                value = row.get(name)
+                if value is not None:
+                    metrics[f"torch_self.{category}.{suffix}"] = float(value)
             share = row.get("share_of_summed_self_wall_pct")
             if share is not None:
                 metrics[f"torch_self_share.{category}.pct"] = float(share)
@@ -96,7 +114,10 @@ def compare(inputs: list[tuple[str, Path]]) -> dict[str, Any]:
         payload = json.loads(path.read_text(encoding="utf-8"))
         runs.append({"label": label, "path": str(path), "metrics": flatten(payload)})
     baseline = runs[0]["metrics"]
-    all_names = sorted({name for run in runs for name in run["metrics"]})
+    all_names = sorted(
+        {name for run in runs for name in run["metrics"]},
+        key=metric_sort_key,
+    )
     rows = []
     for name in all_names:
         values = []
@@ -118,24 +139,107 @@ def compare(inputs: list[tuple[str, Path]]) -> dict[str, Any]:
                 }
             )
         rows.append({"metric": name, "values": values})
+    warnings = self_cpu_transfer_warnings(runs)
     return {
         "baseline": runs[0]["label"],
         "runs": [{"label": run["label"], "path": run["path"]} for run in runs],
         "metrics": rows,
+        "warnings": warnings,
         "notes": [
             "Compare only identical workload windows and profiler configurations.",
+            "PyTorch Total Self CPU is the primary acceptance metric for torch-trace comparisons.",
+            "A sync-category reduction is not a win when equal or greater Self CPU moves to other categories.",
             "CPU sample shares are statistical; compare sample count and confidence.",
             "A smaller blocking API wall time is not necessarily smaller on-CPU time.",
         ],
     }
 
 
+def metric_sort_key(name: str) -> tuple[int, str]:
+    priority = {
+        "torch_trace.total_self_cpu_ms": 0,
+        "torch_trace.self_cpu_ms_per_request": 1,
+        "torch_trace.self_cpu_ms_per_decode_step": 2,
+    }
+    if name in priority:
+        return priority[name], name
+    if name.startswith("torch_self.") and not name.startswith("torch_self_share."):
+        return 10, name
+    if name.startswith("torch_self_share."):
+        return 20, name
+    return 100, name
+
+
+def self_cpu_transfer_warnings(runs: list[dict[str, Any]]) -> list[str]:
+    if len(runs) < 2:
+        return []
+    baseline = runs[0]
+    baseline_metrics = baseline["metrics"]
+    warnings = []
+    for run in runs[1:]:
+        current = run["metrics"]
+        total_name, sync_name = _self_cpu_comparison_pair(
+            baseline_metrics, current
+        )
+        if total_name is None or sync_name is None:
+            continue
+        total_delta = current[total_name] - baseline_metrics[total_name]
+        sync_delta = current[sync_name] - baseline_metrics[sync_name]
+        other_delta = total_delta - sync_delta
+        if sync_delta < 0 and total_delta >= 0:
+            warnings.append(
+                f"{run['label']}: CUDA sync Self CPU decreased, but Total "
+                "Self CPU did not; the change is not an overall Self CPU win."
+            )
+        elif sync_delta < 0 and other_delta > 0:
+            warnings.append(
+                f"{run['label']}: CUDA sync Self CPU decreased, but other "
+                f"categories increased by {other_delta:.4f} in the same "
+                "normalization unit."
+            )
+    return warnings
+
+
+def _self_cpu_comparison_pair(
+    baseline: dict[str, float], current: dict[str, float]
+) -> tuple[str | None, str | None]:
+    candidates = (
+        (
+            "torch_trace.self_cpu_ms_per_request",
+            "torch_self.cuda_sync_wait_wall.ms_per_request",
+        ),
+        (
+            "torch_trace.self_cpu_ms_per_decode_step",
+            "torch_self.cuda_sync_wait_wall.ms_per_decode_step",
+        ),
+        (
+            "torch_trace.total_self_cpu_ms",
+            "torch_self.cuda_sync_wait_wall.ms",
+        ),
+    )
+    for total_name, sync_name in candidates:
+        if (
+            total_name in baseline
+            and total_name in current
+            and sync_name in baseline
+            and sync_name in current
+        ):
+            return total_name, sync_name
+    return None, None
+
+
 def markdown(payload: dict[str, Any]) -> str:
     labels = [run["label"] for run in payload["runs"]]
-    lines = [
+    lines = []
+    if payload.get("warnings"):
+        lines.append("## Self CPU transfer warnings")
+        lines.append("")
+        lines.extend(f"- {warning}" for warning in payload["warnings"])
+        lines.append("")
+    lines.extend([
         "| Metric | " + " | ".join(labels) + " |",
         "|---|" + "---:|" * len(labels),
-    ]
+    ])
     for row in payload["metrics"]:
         rendered = []
         for index, value in enumerate(row["values"]):

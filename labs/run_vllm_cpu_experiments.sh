@@ -11,6 +11,9 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-artifacts/vllm_cpu_experiments}"
 PROFILE_SECONDS="${PROFILE_SECONDS:-30}"
 PERF_FREQ="${PERF_FREQ:-199}"
 PYSPY_RATE="${PYSPY_RATE:-100}"
+TRACE_REQUESTS="${TRACE_REQUESTS:-}"
+TRACE_DECODE_STEPS="${TRACE_DECODE_STEPS:-}"
+TRACE_THREAD_REGEX="${TRACE_THREAD_REGEX:-}"
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -43,6 +46,8 @@ Collect vLLM CUDA wait, CPU self-time, scheduler, GIL, and IRQ evidence.
 Environment:
   OUTPUT_ROOT=artifacts/vllm_cpu_experiments
   PROFILE_SECONDS=30 PERF_FREQ=199 PYSPY_RATE=100
+  TRACE_REQUESTS=1 TRACE_DECODE_STEPS=99  # example; count actual trace steps
+  TRACE_THREAD_REGEX='EngineCor|Worker'  # optional thread-name filter
 
 System inventory:
   bash labs/run_vllm_cpu_experiments.sh doctor
@@ -377,8 +382,19 @@ run_torch_trace() {
   label="$(normalize_label "$2")"
   [[ -f "${trace}" ]] || { echo "Trace does not exist: ${trace}" >&2; exit 1; }
   local directory="${OUTPUT_ROOT}/${label}/analysis"
+  local arguments=()
   mkdir -p "${directory}"
+  if [[ -n "${TRACE_REQUESTS}" ]]; then
+    arguments+=(--requests "${TRACE_REQUESTS}")
+  fi
+  if [[ -n "${TRACE_DECODE_STEPS}" ]]; then
+    arguments+=(--decode-steps "${TRACE_DECODE_STEPS}")
+  fi
+  if [[ -n "${TRACE_THREAD_REGEX}" ]]; then
+    arguments+=(--thread-regex "${TRACE_THREAD_REGEX}")
+  fi
   "${PYTHON_BIN}" labs/analyze_torch_trace_cpu.py "${trace}" \
+    "${arguments[@]}" \
     --output-json "${directory}/torch-cpu-self-summary.json" \
     | tee "${directory}/torch-cpu-self-summary.txt"
 }

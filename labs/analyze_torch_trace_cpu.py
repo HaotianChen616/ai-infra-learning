@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Compute CPU-side inclusive/self wall time from a PyTorch Chrome trace.
+"""Reconstruct PyTorch Profiler Self CPU time from a Chrome trace.
 
-This reproduces the useful *self* concept (exclusive of nested recorded events)
-without pretending that a blocking CUDA API's self wall time is active CPU time.
-Use perf or Nsys CPU samples for true on-CPU self time.
+The primary metric is the sum of exclusive Host durations recorded by PyTorch
+Profiler. Optional request/step counts normalize that metric for controlled A/B
+comparisons. Perf and Nsys remain diagnostic tools; they do not replace the
+selected PyTorch Self CPU time acceptance metric.
 """
 
 from __future__ import annotations
@@ -77,6 +78,14 @@ def percentile(values: Iterable[float], fraction: float) -> float | None:
     return ordered[low] * (1 - weight) + ordered[high] * weight
 
 
+def integer_track_id(value: Any) -> int | None:
+    """Return a numeric Chrome-trace process/thread id, excluding UI tracks."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def load_events(
     path: Path,
     *,
@@ -89,8 +98,12 @@ def load_events(
     thread_names: dict[tuple[int, int], str] = {}
     for raw in raw_events:
         if raw.get("ph") == "M" and raw.get("name") == "thread_name":
+            pid = integer_track_id(raw.get("pid", 0))
+            tid = integer_track_id(raw.get("tid", 0))
+            if pid is None or tid is None:
+                continue
             args = raw.get("args", {})
-            thread_names[(int(raw.get("pid", 0)), int(raw.get("tid", 0)))] = str(
+            thread_names[(pid, tid)] = str(
                 args.get("name", "")
             )
 
@@ -99,10 +112,17 @@ def load_events(
         if raw.get("ph") != "X" or "dur" not in raw or "ts" not in raw:
             continue
         category = str(raw.get("cat", ""))
-        if category.lower() in GPU_CATEGORIES:
+        normalized_category = category.lower()
+        if normalized_category in GPU_CATEGORIES or normalized_category.startswith(
+            "gpu_"
+        ):
             continue
-        pid = int(raw.get("pid", 0))
-        tid = int(raw.get("tid", 0))
+        pid = integer_track_id(raw.get("pid", 0))
+        tid = integer_track_id(raw.get("tid", 0))
+        if pid is None or tid is None:
+            # PyTorch traces also contain UI-only tracks such as pid="Spans".
+            # They are not CPU thread events and would double count annotations.
+            continue
         if thread_regex and not thread_regex.search(thread_names.get((pid, tid), "")):
             continue
         left = float(raw["ts"])
@@ -158,6 +178,38 @@ def classify(event: CpuEvent) -> str:
         return "cuda_submission_runtime"
     if "python_gil" in details or "gil" in event.category.lower():
         return "python_gil"
+    if any(
+        token in details
+        for token in (
+            "_thread.lock",
+            "threading.py(331): wait",
+            "condition.wait",
+            "queue.py",
+            "zmq/sugar/poll.py",
+            "select.poll",
+            "epoll",
+        )
+    ):
+        return "python_lock_or_wait_wall"
+    if any(
+        token in details
+        for token in (
+            "usage/usage_lib.py",
+            "_report_usage_worker",
+            "_report_continuous_usage",
+        )
+    ):
+        return "vllm_background"
+    if any(
+        token in details
+        for token in (
+            "threading.py(1002): _bootstrap",
+            "threading.py(982): run",
+            "multiprocessing/spawn.py",
+            "multiprocessing/process.py",
+        )
+    ):
+        return "python_thread_root_or_unattributed"
     if any(token in details for token in ("numpy", "multiarray", "umath", "ndarray")):
         return "numpy"
     if any(token in details for token in (
@@ -187,10 +239,19 @@ def classify(event: CpuEvent) -> str:
 
 
 def summarize(
-    events: list[CpuEvent], thread_names: dict[tuple[int, int], str]
+    events: list[CpuEvent],
+    thread_names: dict[tuple[int, int], str],
+    *,
+    requests: int | None = None,
+    decode_steps: int | None = None,
 ) -> dict[str, Any]:
+    if requests is not None and requests < 1:
+        raise ValueError("requests must be positive")
+    if decode_steps is not None and decode_steps < 1:
+        raise ValueError("decode_steps must be positive")
     assign_children(events)
     total_self = sum(event.self_us for event in events)
+    total_self_ms = total_self / 1_000
     grouped: dict[str, list[CpuEvent]] = defaultdict(list)
     by_name: dict[tuple[str, str], list[CpuEvent]] = defaultdict(list)
     by_thread: dict[tuple[int, int], float] = defaultdict(float)
@@ -208,6 +269,12 @@ def summarize(
                 "category": category,
                 "calls": len(rows),
                 "self_wall_ms": category_total / 1_000,
+                "self_cpu_ms_per_request": (
+                    category_total / 1_000 / requests if requests else None
+                ),
+                "self_cpu_ms_per_decode_step": (
+                    category_total / 1_000 / decode_steps if decode_steps else None
+                ),
                 "share_of_summed_self_wall_pct": (
                     category_total / total_self * 100 if total_self else None
                 ),
@@ -230,6 +297,12 @@ def summarize(
                 "analysis_category": classify(rows[0]),
                 "calls": len(rows),
                 "self_wall_ms": self_total / 1_000,
+                "self_cpu_ms_per_request": (
+                    self_total / 1_000 / requests if requests else None
+                ),
+                "self_cpu_ms_per_decode_step": (
+                    self_total / 1_000 / decode_steps if decode_steps else None
+                ),
                 "inclusive_wall_ms": inclusive_total / 1_000,
                 "share_of_summed_self_wall_pct": (
                     self_total / total_self * 100 if total_self else None
@@ -246,6 +319,12 @@ def summarize(
             "tid": tid,
             "thread_name": thread_names.get((pid, tid), ""),
             "summed_self_wall_ms": value / 1_000,
+            "self_cpu_ms_per_request": (
+                value / 1_000 / requests if requests else None
+            ),
+            "self_cpu_ms_per_decode_step": (
+                value / 1_000 / decode_steps if decode_steps else None
+            ),
         }
         for (pid, tid), value in sorted(
             by_thread.items(), key=lambda item: item[1], reverse=True
@@ -253,15 +332,28 @@ def summarize(
     ]
     return {
         "events": len(events),
-        "summed_cpu_self_wall_ms": total_self / 1_000,
+        "total_self_cpu_ms": total_self_ms,
+        # Kept for compatibility with summaries generated before the metric
+        # was explicitly aligned to PyTorch Profiler's Self CPU terminology.
+        "summed_cpu_self_wall_ms": total_self_ms,
+        "normalization": {
+            "requests": requests,
+            "decode_steps": decode_steps,
+            "self_cpu_ms_per_request": (
+                total_self_ms / requests if requests else None
+            ),
+            "self_cpu_ms_per_decode_step": (
+                total_self_ms / decode_steps if decode_steps else None
+            ),
+        },
         "by_analysis_category": group_rows,
         "top_functions": function_rows[:100],
         "by_thread": thread_rows,
         "notes": [
-            "Self wall excludes nested recorded trace events on the same thread.",
-            "Summing threads can exceed process wall time because threads overlap.",
-            "cuda_sync_wait_wall includes sleep/descheduling and is not active CPU time.",
-            "Use Nsys/perf leaf CPU samples for true on-CPU self-time shares.",
+            "Self CPU is reconstructed as recorded Host duration excluding nested events on the same thread.",
+            "The all-thread total can exceed trace wall time because thread timelines overlap.",
+            "cuda_sync_wait_wall includes sleep/descheduling; it remains part of the selected Self CPU metric.",
+            "Use Nsys/perf only to explain changes in Self CPU, not to replace the acceptance metric.",
         ],
     }
 
@@ -273,8 +365,21 @@ def _fmt(value: Any) -> str:
 def print_summary(payload: dict[str, Any]) -> None:
     print(
         f"CPU trace events={payload['events']} "
-        f"summed self wall={payload['summed_cpu_self_wall_ms']:.3f} ms"
+        f"total Self CPU={payload['total_self_cpu_ms']:.3f} ms"
     )
+    normalization = payload["normalization"]
+    if normalization["self_cpu_ms_per_request"] is not None:
+        print(
+            "Self CPU/request="
+            f"{normalization['self_cpu_ms_per_request']:.3f} ms "
+            f"(requests={normalization['requests']})"
+        )
+    if normalization["self_cpu_ms_per_decode_step"] is not None:
+        print(
+            "Self CPU/decode step="
+            f"{normalization['self_cpu_ms_per_decode_step']:.3f} ms "
+            f"(decode_steps={normalization['decode_steps']})"
+        )
     print("CATEGORY".ljust(34), "CALLS".rjust(8), "SELF_MS".rjust(12), "SHARE%".rjust(10))
     for row in payload["by_analysis_category"]:
         print(
@@ -291,6 +396,8 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-us", type=float)
     parser.add_argument("--end-us", type=float)
     parser.add_argument("--thread-regex")
+    parser.add_argument("--requests", type=int)
+    parser.add_argument("--decode-steps", type=int)
     parser.add_argument("--output-json", type=Path)
     return parser
 
@@ -301,6 +408,10 @@ def main() -> None:
         raise SystemExit(f"Trace does not exist: {args.trace}")
     if args.start_us is not None and args.end_us is not None and args.start_us >= args.end_us:
         raise SystemExit("--start-us must be smaller than --end-us")
+    if args.requests is not None and args.requests < 1:
+        raise SystemExit("--requests must be positive")
+    if args.decode_steps is not None and args.decode_steps < 1:
+        raise SystemExit("--decode-steps must be positive")
     thread_re = re.compile(args.thread_regex) if args.thread_regex else None
     events, names = load_events(
         args.trace,
@@ -308,8 +419,22 @@ def main() -> None:
         end_us=args.end_us,
         thread_regex=thread_re,
     )
-    payload = summarize(events, names)
+    if not events:
+        raise SystemExit(
+            "no numeric CPU events matched the selected trace window/thread filter"
+        )
+    payload = summarize(
+        events,
+        names,
+        requests=args.requests,
+        decode_steps=args.decode_steps,
+    )
     payload["source"] = str(args.trace)
+    payload["filters"] = {
+        "start_us": args.start_us,
+        "end_us": args.end_us,
+        "thread_regex": args.thread_regex,
+    }
     print_summary(payload)
     if args.output_json:
         args.output_json.parent.mkdir(parents=True, exist_ok=True)

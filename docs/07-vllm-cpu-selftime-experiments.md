@@ -5,7 +5,8 @@ GPU kernel 性能分析，而是回答以下问题：
 
 1. `cudaEventSynchronize` 的 Host API 时间中，多少是 Device event 尚未完成，多少是
    event 已完成之后 Host 才返回的尾巴；
-2. 阻塞、CUDA active wait、Python 轮询和短轮询后阻塞，分别消耗多少真正的 CPU；
+2. 阻塞、CUDA active wait、Python 轮询和短轮询后阻塞，分别让 PyTorch Profiler
+   `Self CPU time` 发生什么变化；
 3. 绑核之后同步 API 变短，究竟是 event 更早完成，还是 OS 唤醒/调度尾巴变短；
 4. CPU 总 self time 中，NumPy、Python 调度器、JIT/编译、GIL、CUDA Runtime/Driver、
    内存分配和 OS 分别占多少；
@@ -18,27 +19,38 @@ GPU kernel 性能分析，而是回答以下问题：
 > 安全边界：wait policy 源码补丁只用于诊断，默认行为仍是 `blocking`。不要将
 > `python_poll` 直接用于生产；它会占满一个 CPU、持有 GIL，并可能让结果更差。
 
+> 本手册唯一的主验收指标是 PyTorch Profiler 的 `Self CPU time total`。端到端时间、
+> GPU 时间、`task-clock`、cycles 和 on-CPU samples 都不替代它；后几项只用于解释
+> Self CPU 为什么变化以及记录副作用。
+
 ## 1. 先统一“CPU self time”的定义
 
-同一个工具界面中的 `Self CPU` 很容易被误读。本文固定保留三套互不替代的指标：
+同一个工具界面中的 `Self CPU` 很容易被误读。本文固定保留三套互不替代的指标，
+并明确第一项是主指标：
 
 | 指标 | 含义 | 主要工具 | 能否当作真正 CPU 计算量 |
 |---|---|---|---|
-| CPU self wall | 一个 CPU 事件扣掉同线程已记录子事件后的墙钟时间 | PyTorch trace | 不能；同步 sleep 也在里面 |
+| PyTorch Self CPU | 一个 CPU 事件扣掉同线程已记录子事件后的 Host 时间 | PyTorch trace | **主验收指标**；同步 sleep 也在里面 |
 | on-CPU sampled self | 线程实际被调度到 CPU 上时，采样栈最叶层的占比 | `perf record`、Nsys CPU sampling、`py-spy` | 可以做统计估计 |
 | off-CPU time | 线程 blocked/sleeping/ready、但没有执行指令的时间 | Nsys context switch、`perf sched` | 不能算 CPU 计算量 |
 
-因此如果目标是“只优化 CPU 侧总 self time”，主 KPI 应是：
+固定工作量下的主 KPI 是：
 
 ```text
-进程 task-clock / 固定请求数
-perf 或 Nsys 的 leaf self samples / 固定请求数
-cycles、instructions、IPC、cache/branch miss
+Total Self CPU time
+Total Self CPU time / 固定请求数
+Total Self CPU time / 固定 decode step 数
+各类别 Self CPU time 及其占 Total Self CPU 的比例
 ```
 
-PyTorch trace 中 `cudaEventSynchronize` 的 self wall 要单列为“等待边界”，不能和
-NumPy/Python 的 on-CPU 样本相加。同步 API 的墙钟 self time 变短，可能只表示少睡了，
-不一定少执行了 CPU 指令。
+PyTorch Profiler 的 `Self CPU` 来自记录事件的 Host 起止时间。对同步 API，它可以包含
+线程 sleep、deschedule 和 ready 后等待运行的时间；这些时间即使不执行 CPU 指令，仍然
+属于本手册选择的指标。`perf`、Nsys 和 OS 数据负责把变化解释为 device wait、Host
+return tail、on-CPU Runtime/Driver 或调度延迟，但不改变最终验收口径。
+
+分析器会跨线程求和，以对应 PyTorch `key_averages()` 中各事件 Self CPU 的加总概念。
+因为线程能够重叠，该总和可以大于 trace 的真实墙钟窗口；这不是错误，但 A/B 必须使用
+相同线程范围。若只关心 EngineCore/worker，应对两组使用完全相同的线程名过滤规则。
 
 ## 2. 工具和脚本地图
 
@@ -48,7 +60,7 @@ NumPy/Python 的 on-CPU 样本相加。同步 API 的墙钟 self time 变短，�
 |---|---|
 | `labs/run_vllm_cpu_experiments.sh` | 统一采集入口，避免手工参数漂移 |
 | `labs/analyze_nsys_sqlite.py` | 拆同步 event、OS 调度和 CUDA 提交边界 |
-| `labs/analyze_torch_trace_cpu.py` | 计算 Chrome trace 的 CPU exclusive/self wall |
+| `labs/analyze_torch_trace_cpu.py` | 重建 Chrome trace 的 PyTorch Self CPU，并按请求/step 归一化 |
 | `labs/summarize_cpu_probes.py` | 汇总 `perf stat` 和 `py-spy` |
 | `labs/diff_proc_interrupts.py` | 计算 `/proc/interrupts`、`softirqs` 的采样窗口增量 |
 | `labs/patch_vllm_event_wait.py` | 可恢复地给 vLLM 0.26 增加四种 wait policy |
@@ -178,8 +190,8 @@ bash labs/run_vllm_cpu_experiments.sh snapshot "${ENGINE_PID}" baseline
 
 | 实验 | 只改变什么 | 采集 | 回答的问题 |
 |---|---|---|---|
-| E0 | profiler 配置 | unattached、Nsys low/deep/cpu | profiler 本身开销多大 |
-| E1 | 无 | PyTorch trace、perf、py-spy | CPU self time 在哪里 |
+| E0 | profiler 配置 | PyTorch 相同配置、Nsys low/deep/cpu | profiler 配置是否可比、诊断开销多大 |
+| E1 | 无 | PyTorch trace 为主，perf/py-spy 辅助 | Total Self CPU 在哪里 |
 | E2 | 无 | Nsys deep event/context switch | wait 和 Host return tail 各多少 |
 | E3 | wait policy | blocking/spin/python_poll/hybrid | 阻塞、轮询和混合等待取舍 |
 | E4 | CPU/NUMA placement | perf、sched、IRQ | 绑核收益来自哪里 |
@@ -215,11 +227,85 @@ bash labs/run_vllm_cpu_experiments.sh nsys-low e0_low -- \
 Nsys 只保存 capture range 中的请求。
 
 分别重启做 `nsys-low`、`nsys-deep`、`nsys-cpu`；另外保留一轮完全不 attach profiler
-的 `perf stat` 对照。后面任何精确微秒结论都要注明来自哪种配置。
+的 `perf stat` 对照，用来理解诊断工具的 observer effect。最终 Self CPU A/B 必须来自
+相同 PyTorch Profiler 配置，不能拿 Nsys API duration 与 PyTorch Self CPU 直接相减。
 
-## 7. E1：只看 CPU 侧总 self time
+## 7. E1：PyTorch Self CPU 主实验
 
-### 7.1 `perf stat`：总 CPU 预算
+### 7.1 PyTorch trace：唯一主验收数据
+
+另开一轮服务启用 torch profiler，配置方式按当前 vLLM 0.26 的
+`--profiler-config` 语法设置输出目录、`with_stack=true`、`record_shapes=false`、
+`profile_memory=false`。A/B 两组的 profiler 配置必须完全相同，只采 warmup 后的稳定
+窗口。
+
+如果一份 trace 包含 1 个请求，先用请求数做不会歧义的归一化：
+
+```bash
+TRACE_REQUESTS=1 \
+bash labs/run_vllm_cpu_experiments.sh torch-trace \
+  /path/to/batch1.pt.trace.json e1_torch
+```
+
+`TRACE_DECODE_STEPS` 必须使用 trace 窗口内真实的 decode step 数。若 trace 包含 prefill
+和 decode，`Total Self CPU/request` 可以作为全窗口主指标；`/decode step` 只用于明确
+选出的 decode 稳态窗口，不能把 prefill Self CPU 除以 decode step 后冒充 decode 成本。
+普通非 speculative 路径理论上常见“prefill 产生首 token，再执行 N-1 次 decode”，但
+async output pipeline、最终 drain 和额外同步会使 API 调用次数不同；不能用输出 token
+数或 `cudaEventSynchronize` calls 直接冒充 step 数。核验后再加入例如
+`TRACE_DECODE_STEPS=99`。
+
+如果只统计 EngineCore/worker 线程，两组使用相同正则：
+
+```bash
+TRACE_REQUESTS=1 \
+TRACE_THREAD_REGEX='EngineCor|Worker' \
+bash labs/run_vllm_cpu_experiments.sh torch-trace \
+  /path/to/batch1.pt.trace.json e1_engine_threads
+```
+
+也可以直接截取时间窗口：
+
+```bash
+python3 labs/analyze_torch_trace_cpu.py \
+  /path/to/batch1.pt.trace.json \
+  --start-us 100000 --end-us 500000 \
+  --requests 1 \
+  --thread-regex 'EngineCor|Worker' \
+  --output-json decode-cpu-self.json
+```
+
+主报告固定先看：
+
+```text
+total_self_cpu_ms
+normalization.self_cpu_ms_per_request
+normalization.self_cpu_ms_per_decode_step
+by_analysis_category[*].self_wall_ms
+by_analysis_category[*].share_of_summed_self_wall_pct
+```
+
+`total_self_cpu_ms` 是从 Chrome trace 的同线程嵌套关系重建的 exclusive Self CPU 加总。
+保留旧字段 `summed_cpu_self_wall_ms` 只是兼容历史 JSON，两者数值相同。跨线程加总可以
+超过 trace 墙钟窗口，因此不能把它叫作进程端到端时间。
+
+真实 PyTorch trace 的线程名可能被截成 `VLLM::EngineCor`，所以示例用 `EngineCor`。
+GPU annotation、kernel 等非 CPU 展示轨道会被排除；`threading.wait`、`_thread.lock`、
+ZMQ poll 和后台 usage thread 会单列，避免全部落入 `python_other`。
+
+### 7.2 如何防止“同步时间只是搬家”
+
+不能只比较 `cudaEventSynchronize`。例如：
+
+```text
+baseline: sync 40 ms + other 60 ms = Total Self CPU 100 ms
+candidate: sync 20 ms + other 90 ms = Total Self CPU 110 ms
+```
+
+同步下降 20 ms，但其他类别增加 30 ms，候选方案对本目标是退化。统一对比器会在
+“CUDA sync Self CPU 下降但 Total Self CPU 未下降”时输出 warning。
+
+### 7.3 `perf stat`：解释副作用，不负责验收
 
 服务器 warmup 后，终端 A：
 
@@ -228,11 +314,11 @@ PROFILE_SECONDS=60 \
 bash labs/run_vllm_cpu_experiments.sh perf-stat "${ENGINE_PID}" e1_baseline_r1
 ```
 
-终端 B 在同一时间重放固定 workload。输出重点：
+终端 B 在同一时间重放固定 workload。下面这些量只解释 Self CPU 变化和资源副作用：
 
 ```text
-task-clock / 请求数          真正占用 CPU 的总预算
-cycles / instructions       指令是否真的减少
+task-clock / 请求数          实际占用 CPU 的预算
+cycles / instructions       指令和周期是否变化
 IPC                         前端/后端停顿的综合线索
 branch-miss %               Python 分支、哈希/调度决策线索
 cache-miss %                指针追逐、大数组/NUMA 线索
@@ -240,63 +326,24 @@ context switches / CPU s    调度切换压力
 CPU migrations / CPU s      迁核和 cache 冷却
 ```
 
-### 7.2 `perf record`：native + Python 叶函数
+允许某个候选方案降低 PyTorch Total Self CPU、但提高 `task-clock`，例如 active spin 用
+更多实际 CPU 换更短的 Host wait。该方案仍然满足本文主指标，但必须报告资源副作用。
+
+### 7.4 `perf record` 和 `py-spy`：定位代码原因
 
 ```bash
 PROFILE_SECONDS=60 PERF_FREQ=199 \
 bash labs/run_vllm_cpu_experiments.sh perf-record "${ENGINE_PID}" e1_baseline_r1
-```
 
-查看：
-
-```text
-artifacts/vllm_cpu_experiments/e1_baseline_r1/perf/perf-report-self.txt
-artifacts/vllm_cpu_experiments/e1_baseline_r1/perf/perf-report-inclusive.txt
-```
-
-`--no-children` 的 self 更接近“CPU 在哪条叶指令上”，`--children` 用于回答它由哪条
-Python/框架路径调用。Python 符号不完整时，使用带 debug/unwind 支持的 Python，或用
-下一节的 `py-spy` 补充，不要把 `[unknown]` 强行归类。
-
-### 7.3 `py-spy`：Python 栈与 GIL holder
-
-```bash
 PROFILE_SECONDS=60 PYSPY_RATE=100 \
 bash labs/run_vllm_cpu_experiments.sh pyspy "${ENGINE_PID}" e1_baseline_r1
-```
 
-脚本会顺序采两轮，所以终端 B 也必须重放两轮完全相同的 workload。第一轮采所有
-Python 栈，第二轮只保留持有 GIL 的栈。汇总：
-
-```bash
 bash labs/run_vllm_cpu_experiments.sh probe-summary e1_baseline_r1
 ```
 
-`gil_sample_ratio_proxy_pct` 只是相同采样率、相同长度、相同负载下的诊断 proxy，
-不是线程等待 GIL 的精确时长。
-
-### 7.4 PyTorch trace：墙钟 self 和调用关系
-
-另开一轮服务启用 torch profiler，配置方式按当前 vLLM 0.26 的
-`--profiler-config` 语法设置输出目录、`with_stack=true`、`record_shapes=false`、
-`profile_memory=false`。只采稳定窗口。导出后运行：
-
-```bash
-bash labs/run_vllm_cpu_experiments.sh torch-trace \
-  /path/to/batch1.pt.trace.json e1_torch
-```
-
-可以用 `--start-us/--end-us` 直接调用 Python 分析器截取 decode 稳态：
-
-```bash
-python3 labs/analyze_torch_trace_cpu.py \
-  /path/to/batch1.pt.trace.json \
-  --start-us 100000 --end-us 500000 \
-  --output-json decode-cpu-self.json
-```
-
-不要比较一整份 trace 的 prefill 和另一份 trace 的 decode，也不要把多线程
-`summed_cpu_self_wall_ms` 当作进程墙钟；多线程有重叠时总和可以超过窗口长度。
+`perf --no-children` 和 `py-spy` 的 leaf 用于说明 Python、NumPy、Runtime/Driver 的
+热点来源，不替代 PyTorch Self CPU。`py-spy --gil` 两轮必须重放相同 workload；
+`gil_sample_ratio_proxy_pct` 只是诊断 proxy，不是 GIL 等待 Self CPU。
 
 ## 8. E2：把 `cudaEventSynchronize` 打开
 
@@ -380,8 +427,9 @@ python3 labs/patch_vllm_event_wait.py restore
 | python_poll | 最高 | 可能低 | 持有 GIL，伤害最大 | 只做反例/诊断 |
 | hybrid | 介于两者 | 短 wait 可能受益 | 取决于阈值 | wait 分布集中且专核时 |
 
-接受 hybrid 的必要条件不是 API wall 单项下降，而是固定请求数的 `task-clock` 没超预算，
-P99 `post_event_host_tail` 确实下降，且没有把 CPU 样本和 GIL 压力转移给其他线程。
+接受 hybrid 的主条件是固定请求数/step 的 PyTorch `Total Self CPU` 下降，而不只是
+`cudaEventSynchronize` 单项下降。`task-clock`、CPU 样本和 GIL 压力可以上升，但必须
+作为资源副作用报告；P99 `post_event_host_tail` 用于解释同步 Self CPU 为什么变化。
 
 ## 10. E4：绑核和 NUMA
 
@@ -425,11 +473,12 @@ bash labs/run_vllm_cpu_experiments.sh irq e4_pinned
 
 解释顺序：
 
-1. migrations 是否下降；
-2. cache miss、cycles 和 on-CPU self 是否下降；
+1. 固定请求数/step 的 PyTorch `Total Self CPU` 是否下降；
+2. CUDA sync、Python/NumPy 和其他 Self CPU 是否只是互相转移；
 3. wait 内 ready/off-CPU 和 post-event tail 是否下降；
-4. 目标 CPU 上是否有 NVIDIA/NIC/NVMe IRQ 突增；
-5. 是否只是把干扰挪到了同物理核的 SMT sibling。
+4. migrations、cache miss、cycles 是否解释了该变化；
+5. 目标 CPU 上是否有 NVIDIA/NIC/NVMe IRQ 突增；
+6. 是否只是把干扰挪到了同物理核的 SMT sibling。
 
 不要一开始就同时改 IRQ affinity、governor、C-state、nice 和 cpuset，否则无法知道哪个
 变量生效。
@@ -446,7 +495,8 @@ bash labs/run_vllm_cpu_experiments.sh irq e4_pinned
 | Python self 低但 scheduler inclusive 高 | 子调用或 native 库 | 看 children/call stack，不要 JIT 错对象 |
 
 对 `get_num_common_prefix_blocks` 这类逻辑，先用输入规模做复杂度实验：固定 block 数分别
-取 `1x, 2x, 4x`，观察 instructions 和 task-clock：
+取 `1x, 2x, 4x`，主看它和 Total Self CPU 的变化，再用 instructions、cache miss 和
+task-clock 解释：
 
 - 近线性增长且 Python eval/dict 样本高：算法/解释器遍历；
 - instructions 变化不大、cache miss 和 cycles 增长：更偏访存/指针追逐；
@@ -462,8 +512,8 @@ bash labs/run_vllm_cpu_experiments.sh irq e4_pinned
 6. 只有确认稳定热点后，才用 Cython/mypyc/Numba/C++ extension 搬走循环。
 
 `torch.compile` 主要面向 tensor graph，不会自动消除任意 scheduler 的 dict/list 控制流。
-JIT 实验必须把 compile warmup 排除，并同时报告稳态 instructions、task-clock 和 fallback；
-否则“首轮更慢、后面未知”不能算优化。
+JIT 实验必须把 compile warmup 排除，以稳态 Total Self CPU 为主，同时报告 instructions、
+task-clock 和 fallback；否则“首轮更慢、后面未知”不能算优化。
 
 ## 12. E6：GIL 和 Python 并发
 
@@ -557,6 +607,27 @@ Python → ATen/CUDA Runtime → UMD → KMD → MMIO/PCIe doorbell → GPU fetc
 
 ## 15. 多轮汇总和比较
 
+主 Self CPU 对比先分析两份相同窗口、相同线程范围的 PyTorch trace：
+
+```bash
+TRACE_REQUESTS=1 \
+bash labs/run_vllm_cpu_experiments.sh torch-trace \
+  /traces/unbound.pt.trace.json e1_unbound
+
+TRACE_REQUESTS=1 \
+bash labs/run_vllm_cpu_experiments.sh torch-trace \
+  /traces/pinned.pt.trace.json e4_pinned
+
+bash labs/run_vllm_cpu_experiments.sh compare \
+  unbound=artifacts/vllm_cpu_experiments/e1_unbound/analysis/torch-cpu-self-summary.json \
+  pinned=artifacts/vllm_cpu_experiments/e4_pinned/analysis/torch-cpu-self-summary.json
+```
+
+对比表固定把 `torch_trace.total_self_cpu_ms`、每请求、每 step 指标放在最前面。如果
+CUDA sync 类别下降但 Total Self CPU 没下降，表格顶部会显示耗时转移 warning。
+
+下面的 perf/py-spy 和 Nsys 对比只用于解释主结果。
+
 每个 label 的 `perf-stat`/`py-spy` 采完后：
 
 ```bash
@@ -584,28 +655,30 @@ bash labs/run_vllm_cpu_experiments.sh compare \
 
 ## 16. 如何估算“有多少优化空间”
 
-先用真正的 on-CPU 样本或 task-clock 归一化。若某类别占 CPU self 的比例为 `f`，把它
-加速 `s` 倍，则总 CPU self 的理论下降比例是：
+先从相同 PyTorch trace 窗口得到 `Total Self CPU`。若某类别占该总量的比例为 `f`，
+把它的 Self CPU 加速 `s` 倍，且不把时间转移到其他类别，则总 Self CPU 的理论下降是：
 
 ```text
 gain = 1 - ((1 - f) + f / s)
 ```
 
-例：NumPy/native leaf 占 20%，即使完全消除，CPU self 上限也只是下降 20%；加速 2 倍
-时总 CPU self 只下降 10%。同步 API 占 PyTorch self wall 40%，不能据此声称 CPU 计算
-最多可优化 40%，因为其中可能绝大部分是 off-CPU sleep。
+例：PyTorch trace 中 NumPy 类别占 Total Self CPU 的 20%，即使完全消除，该指标的理论
+上限也只是下降 20%；降低一半时总 Self CPU 下降 10%。同步 API 占 40% 时，它对本文
+选定指标的理论上限就是 40%，即使其中大部分是 off-CPU sleep；但纯 CPU/OS 手段通常
+只能影响 Host return tail、调用次数和部分等待时序，不能承诺消除全部 device wait。
 
 优化空间分三层报告：
 
-1. `measured share`：该类别当前 on-CPU self 占比；
-2. `addressable share`：去掉必要工作、不可改库和测量噪声后的可改比例；
+1. `measured share`：该类别当前占 PyTorch Total Self CPU 的比例；
+2. `addressable share`：在不改变请求工作量的前提下，预计可降低的 Self CPU 比例；
 3. `expected gain`：用原型 A/B 实测，而不是拿理论上限当承诺。
 
 统计要求：
 
 - 每组至少 5 次，报告中位数、P25/P75 或 bootstrap CI；
-- CPU sample 总数太少时延长窗口，不用小样本的 0.1% 排名做结论；
+- PyTorch event 调用次数太少时延长窗口，不用极少调用的百分比做结论；
 - 按固定请求数或固定 decode steps 归一化；
+- A/B 使用相同 PyTorch Profiler 配置、时间阶段和线程过滤；
 - profiler 配置、CPU 频率策略、NUMA、后台流量和模型版本完全一致；
 - A/B 改动后确认工作量没变，例如 scheduler 没少处理请求、输出长度仍为 100。
 
@@ -613,16 +686,17 @@ gain = 1 - ((1 - f) + f / s)
 
 | 观测 | 首选动作 | 不要先做 |
 |---|---|---|
-| NumPy leaf 高、临时分配高 | 预分配、连续化、少拷贝、合并扫描 | 盲目把所有逻辑改成 JIT |
-| Python eval/dict/list 高 | 降低复杂度、增量缓存、紧凑数据结构 | 微调变量名或只换 Python 小版本 |
-| scheduler 每步全量扫描 | 增量维护、批量元数据更新 | 只提高 CPU 优先级 |
+| sync Self CPU 降、Total Self CPU 不降 | 查其他类别增加和时间转移 | 宣称同步优化已经成功 |
+| NumPy Self CPU 高、临时分配高 | 预分配、连续化、少拷贝、合并扫描 | 盲目把所有逻辑改成 JIT |
+| Python Self CPU 高，eval/dict/list 样本也高 | 降低复杂度、增量缓存、紧凑数据结构 | 微调变量名或只换 Python 小版本 |
+| scheduler Self CPU 随 step/block 线性增长 | 增量维护、批量元数据更新 | 只提高 CPU 优先级 |
 | GIL holder 高且其他线程 runnable | native 释放 GIL、分进程、批处理 queue | Python busy polling |
 | malloc/free 高 | 复用对象/buffer、减少 tolist/concat | 绑核掩盖分配热点 |
-| migrations/ready delay 高 | cpuset、专用物理核、NUMA local | 直接上 SCHED_FIFO |
+| 绑核后 Total Self CPU 降且 ready tail 降 | cpuset、专用物理核、NUMA local | 直接上 SCHED_FIFO |
 | IRQ 与 EngineCore 同核高 | 同 NUMA housekeeping 核做单 IRQ A/B | 一次移动所有 IRQ |
-| sync wall 高、on-CPU 低 | 先拆 device wait 和 wake tail | 当作 CPU 算法热点优化 |
-| sync on-CPU 高 | 比较 blocking/spin、看 Runtime/Driver 栈 | 只看 API 名猜 doorbell |
-| JIT/compile 只在 warmup 高 | 排除 warmup、缓存产物 | 优化一次性成本冒充稳态收益 |
+| sync Self CPU 高、on-CPU 低 | 拆 device wait 和 wake tail，测试 blocking/hybrid | 当作 Python 算法热点 |
+| sync Self CPU 与 on-CPU 都高 | 比较 wait policy、看 Runtime/Driver 栈 | 只看 API 名猜 doorbell |
+| JIT/compile Self CPU 只在 warmup 高 | 排除 warmup、缓存产物 | 优化一次性成本冒充稳态收益 |
 
 ## 18. 回传数据清单
 
