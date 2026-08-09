@@ -3,8 +3,8 @@
 
 The primary metric is the sum of exclusive Host durations recorded by PyTorch
 Profiler. Optional request/step counts normalize that metric for controlled A/B
-comparisons. Perf and Nsys remain diagnostic tools; they do not replace the
-selected PyTorch Self CPU time acceptance metric.
+comparisons. Perf and Nsys additionally measure the secondary actual on-CPU
+optimization target; they do not replace the primary PyTorch Self CPU metric.
 """
 
 from __future__ import annotations
@@ -353,7 +353,7 @@ def summarize(
             "Self CPU is reconstructed as recorded Host duration excluding nested events on the same thread.",
             "The all-thread total can exceed trace wall time because thread timelines overlap.",
             "cuda_sync_wait_wall includes sleep/descheduling; it remains part of the selected Self CPU metric.",
-            "Use Nsys/perf only to explain changes in Self CPU, not to replace the acceptance metric.",
+            "Use Nsys/perf to optimize actual on-CPU cost and explain Self CPU changes; keep the two metrics separate.",
         ],
     }
 

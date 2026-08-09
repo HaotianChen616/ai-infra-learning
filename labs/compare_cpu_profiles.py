@@ -82,6 +82,14 @@ def flatten(payload: dict[str, Any]) -> dict[str, float]:
         for name, value in (perf.get("derived") or {}).items():
             if value is not None:
                 metrics[f"perf_derived.{name}"] = float(value)
+        normalization = perf.get("normalization") or {}
+        for section, prefix in (
+            ("counters_per_request", "perf_counter_per_request"),
+            ("counters_per_decode_step", "perf_counter_per_decode_step"),
+        ):
+            for name, value in (normalization.get(section) or {}).items():
+                if value is not None:
+                    metrics[f"{prefix}.{name}"] = float(value)
         all_samples = payload.get("pyspy_all") or {}
         metrics["pyspy.total_samples"] = float(all_samples.get("total_samples", 0))
         for row in all_samples.get("by_category", []):
@@ -148,6 +156,7 @@ def compare(inputs: list[tuple[str, Path]]) -> dict[str, Any]:
         "notes": [
             "Compare only identical workload windows and profiler configurations.",
             "PyTorch Total Self CPU is the primary acceptance metric for torch-trace comparisons.",
+            "Perf task-clock, cycles, instructions, and on-CPU samples are secondary optimization metrics, not merely diagnostics.",
             "A sync-category reduction is not a win when equal or greater Self CPU moves to other categories.",
             "CPU sample shares are statistical; compare sample count and confidence.",
             "A smaller blocking API wall time is not necessarily smaller on-CPU time.",
@@ -160,6 +169,16 @@ def metric_sort_key(name: str) -> tuple[int, str]:
         "torch_trace.total_self_cpu_ms": 0,
         "torch_trace.self_cpu_ms_per_request": 1,
         "torch_trace.self_cpu_ms_per_decode_step": 2,
+        "perf_counter_per_request.task-clock": 30,
+        "perf_counter_per_request.cycles": 31,
+        "perf_counter_per_request.instructions": 32,
+        "perf_counter_per_decode_step.task-clock": 33,
+        "perf_counter_per_decode_step.cycles": 34,
+        "perf_counter_per_decode_step.instructions": 35,
+        "perf_counter.task-clock": 36,
+        "perf_counter.cycles": 37,
+        "perf_counter.instructions": 38,
+        "perf_derived.ipc": 39,
     }
     if name in priority:
         return priority[name], name

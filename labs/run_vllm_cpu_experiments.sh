@@ -14,6 +14,8 @@ PYSPY_RATE="${PYSPY_RATE:-100}"
 TRACE_REQUESTS="${TRACE_REQUESTS:-}"
 TRACE_DECODE_STEPS="${TRACE_DECODE_STEPS:-}"
 TRACE_THREAD_REGEX="${TRACE_THREAD_REGEX:-}"
+PROFILE_REQUESTS="${PROFILE_REQUESTS:-}"
+PROFILE_DECODE_STEPS="${PROFILE_DECODE_STEPS:-}"
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -48,6 +50,7 @@ Environment:
   PROFILE_SECONDS=30 PERF_FREQ=199 PYSPY_RATE=100
   TRACE_REQUESTS=1 TRACE_DECODE_STEPS=99  # example; count actual trace steps
   TRACE_THREAD_REGEX='EngineCor|Worker'  # optional thread-name filter
+  PROFILE_REQUESTS=1 PROFILE_DECODE_STEPS=99  # completed inside perf window
 
 System inventory:
   bash labs/run_vllm_cpu_experiments.sh doctor
@@ -422,6 +425,12 @@ run_probe_summary() {
   if [[ ${#arguments[@]} -eq 0 ]]; then
     echo "No perf-stat or py-spy input found below: ${root}" >&2
     exit 1
+  fi
+  if [[ -n "${PROFILE_REQUESTS}" ]]; then
+    arguments+=(--requests "${PROFILE_REQUESTS}")
+  fi
+  if [[ -n "${PROFILE_DECODE_STEPS}" ]]; then
+    arguments+=(--decode-steps "${PROFILE_DECODE_STEPS}")
   fi
   "${PYTHON_BIN}" labs/summarize_cpu_probes.py "${arguments[@]}" \
     --output-json "${directory}/cpu-probes-summary.json" \

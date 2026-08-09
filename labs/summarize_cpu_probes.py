@@ -138,13 +138,38 @@ def summarize(
     perf_stat: Path | None,
     pyspy_all: Path | None,
     pyspy_gil: Path | None,
+    *,
+    requests: int | None = None,
+    decode_steps: int | None = None,
 ) -> dict[str, Any]:
+    if requests is not None and requests < 1:
+        raise ValueError("requests must be positive")
+    if decode_steps is not None and decode_steps < 1:
+        raise ValueError("decode_steps must be positive")
+    perf_payload = parse_perf_stat(perf_stat) if perf_stat else None
+    if perf_payload:
+        counters = perf_payload["counters"]
+        perf_payload["normalization"] = {
+            "requests": requests,
+            "decode_steps": decode_steps,
+            "counters_per_request": (
+                {name: value / requests for name, value in counters.items()}
+                if requests
+                else {}
+            ),
+            "counters_per_decode_step": (
+                {name: value / decode_steps for name, value in counters.items()}
+                if decode_steps
+                else {}
+            ),
+        }
     payload: dict[str, Any] = {
-        "perf_stat": parse_perf_stat(perf_stat) if perf_stat else None,
+        "perf_stat": perf_payload,
         "pyspy_all": parse_pyspy_raw(pyspy_all) if pyspy_all else None,
         "pyspy_gil": parse_pyspy_raw(pyspy_gil) if pyspy_gil else None,
         "notes": [
-            "perf counters must be normalized by on-CPU task-clock or identical windows.",
+            "Treat task-clock, cycles, and instructions as actual on-CPU optimization metrics.",
+            "Compare perf counters over identical windows or normalize them by completed requests/steps.",
             "py-spy --gil reports sampled Python stacks holding the GIL, not GIL wait duration.",
             "py-spy results are statistical and separate runs must use identical load.",
         ],
@@ -162,6 +187,8 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--perf-stat", type=Path)
     parser.add_argument("--pyspy-all", type=Path)
     parser.add_argument("--pyspy-gil", type=Path)
+    parser.add_argument("--requests", type=int)
+    parser.add_argument("--decode-steps", type=int)
     parser.add_argument("--output-json", type=Path)
     return parser
 
@@ -174,7 +201,13 @@ def main() -> None:
     for path in paths:
         if path is not None and not path.is_file():
             raise SystemExit(f"input does not exist: {path}")
-    payload = summarize(args.perf_stat, args.pyspy_all, args.pyspy_gil)
+    payload = summarize(
+        args.perf_stat,
+        args.pyspy_all,
+        args.pyspy_gil,
+        requests=args.requests,
+        decode_steps=args.decode_steps,
+    )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     if args.output_json:
         args.output_json.parent.mkdir(parents=True, exist_ok=True)

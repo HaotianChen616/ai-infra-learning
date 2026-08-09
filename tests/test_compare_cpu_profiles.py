@@ -3,13 +3,20 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from labs.compare_cpu_profiles import compare, flatten, markdown
+from labs.compare_cpu_profiles import compare, flatten, markdown, metric_sort_key
 
 
 class CompareCpuProfilesTest(unittest.TestCase):
     def test_flattens_probe_summary(self) -> None:
         payload = {
-            "perf_stat": {"counters": {"cycles": 12}, "derived": {"ipc": 1.5}},
+            "perf_stat": {
+                "counters": {"task-clock": 20, "cycles": 12},
+                "derived": {"ipc": 1.5},
+                "normalization": {
+                    "counters_per_request": {"task-clock": 10, "cycles": 6},
+                    "counters_per_decode_step": {"instructions": 3},
+                },
+            },
             "pyspy_all": {
                 "total_samples": 10,
                 "by_category": [{"category": "numpy", "share_pct": 30}],
@@ -19,8 +26,15 @@ class CompareCpuProfilesTest(unittest.TestCase):
         }
         metrics = flatten(payload)
         self.assertEqual(metrics["perf_derived.ipc"], 1.5)
+        self.assertEqual(metrics["perf_counter_per_request.task-clock"], 10)
+        self.assertEqual(metrics["perf_counter_per_decode_step.instructions"], 3)
         self.assertEqual(metrics["pyspy_share.numpy.pct"], 30)
         self.assertEqual(metrics["pyspy_gil.sample_ratio_proxy_pct"], 40)
+        names = sorted(metrics, key=metric_sort_key)
+        self.assertLess(
+            names.index("perf_counter_per_request.task-clock"),
+            names.index("perf_counter.task-clock"),
+        )
 
     def test_prioritizes_total_self_cpu_and_warns_on_time_transfer(self) -> None:
         baseline = {
