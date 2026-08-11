@@ -22,6 +22,10 @@
 labs/run_vllm_cuda_sync_profile.sh
 labs/verify_int8_w8a8_config.py
 labs/summarize_cuda_sync.py
+labs/attribute_sync.py            # 情况 A/D/E: 长同步窗口与 GPU kernel/memcpy 重叠
+labs/attribute_cpu_state.py       # capstone: GPU overlap × on-CPU% → 统一情况 A/B/C/D/E
+labs/attribute_cpu_state2.py      # 第13节 T_sync = T_running + T_blocked 的 Running/Blocked 拆分
+labs/bench_sync_sdk.py            # OpenAI-SDK 压测, 绕开 vllm bench serve tokenizer 初始化
 ```
 
 建议首先在 A100 80GB 上使用 TP1，隔离单卡 CUDA Runtime/Driver、kernel 和 Host
@@ -561,6 +565,75 @@ GPU:          [Memcpy HtoD / DtoH]
 
 用 `--cudabacktrace=sync:100000` 的调用栈定位源代码，不要只根据 API 名称猜。
 
+### 自动化归因脚本与实测发现
+
+上面五种情况若逐条在 GUI 里画窗口，样本一多就不可重复。`labs/` 提供三个直接
+读 Nsight SQLite 的归因脚本，把情况 A/B/C/D/E 变成可复现的 JSON：
+
+| 脚本 | 输入 | 输出 | 回答 |
+|---|---|---|---|
+| `attribute_sync.py` | `*.sqlite`（只需 CUDA 轨道） | `analysis/bs8_1024_128/long_sync_attribution.json` | 情况 A/D/E：长同步窗口是否覆盖 kernel/memcpy |
+| `attribute_cpu_state2.py` | `*.sqlite`（需 `SCHED_EVENTS`） | `analysis/pinned_cpu_running_blocked.json` | 第13节 `T_sync = T_running + T_blocked` 拆分 |
+| `attribute_cpu_state.py` | `*.sqlite`（需 CUDA + `SCHED_EVENTS`） | `analysis/pinned_long_sync_combined_attribution.json` | capstone：GPU overlap × on-CPU% → 统一情况 |
+
+`attribute_cpu_state.py` 是 capstone，交叉两个维度给出统一判定，并把情况 A 拆成
+两个性质不同的子类：
+
+```text
+A_gpu_blocked   : GPU kernel 在跑, 调用线程基本 off-CPU (教科书式 futex 阻塞等待)
+A_gpu_spinning  : GPU kernel 在跑, 调用线程基本 on-CPU  (驱动/运行时 poll + 短睡)
+D_memcpy        : 只覆盖 memcpy
+E_no_gpu_running: 无 GPU 工作, 线程 on-CPU (Runtime/Driver overhead)
+BC_no_gpu_off   : 无 GPU 工作, 线程 off-CPU (OS 调度/唤醒尾延迟)
+```
+
+这个 A 的二分是必要的：`cudaEventSynchronize` 名字相同，"线程阻塞等 GPU" 和
+"线程在 CPU 上 poll 同时 GPU 在跑" 对 CPU 优化空间结论完全相反。前者 CPU 无可优化
+（等 GPU/kernel），后者同步窗口里的 task-clock/cycles 是真实 CPU 消耗，归因对象是
+驱动完成路径或 vLLM 等待策略。
+
+方法学注意：`SCHED_EVENTS.threadState` 字段只有同时开 `--sample`（CPU 采样）才会
+被填充；只开 `--cpuctxsw` 的 capture 里 `threadState` 全为 `0 (Unknown)`，无法用它
+区分情况 A/B/C。`isSchedIn` 切上/切出边沿重建 Running 时段在仅有 context-switch
+数据时仍有效，因此 capstone 用 on-CPU% 作为 A/E 与 B/C 的判据。若需要 B 与 C 的
+精确区分（Ready vs Blocked），必须补一轮开 `--sample=process-tree` 的采集。
+
+运行（DB 路径在脚本顶部，按实际产物修改）：
+
+```bash
+python3 labs/attribute_sync.py
+python3 labs/attribute_cpu_state2.py
+python3 labs/attribute_cpu_state.py
+```
+
+可用 capture 上的实测结果（`qwen3_awq_pinned.sqlite`，含 CUDA + `SCHED_EVENTS`，
+339 个 >5ms 长同步）：
+
+```text
+A_gpu_spinning   339  (100%)
+A_gpu_blocked      0
+D_memcpy           0
+E_no_gpu_running   0
+BC_no_gpu_off      0
+
+长同步窗口总墙钟: 48485 ms
+调用线程 on-CPU:  48417 ms  (99.9%)
+```
+
+即：每一条长同步都同时覆盖 GPU kernel，且调用线程几乎全程 on-CPU。这不是教科书
+"线程在 futex 上长睡等 GPU" 的情况 A，而是 `A_gpu_spinning`——GPU 在跑、线程也在
+CPU 上 poll（伴随周期性 ~20–40ms 的极短暂 deschedule，off-CPU 仅 0.14%）。对
+CPU 优化而言，这意味着长同步窗口里的 task-clock/cycles 是真实消耗，不能当成
+"纯等 GPU、CPU 无可优化" 而跳过；但它消耗在驱动完成路径上，而非 vLLM Python
+调度器，所以优化对象是 CUDA Graph 覆盖、kernel/NCCL 时长、驱动版本与等待策略
+（见 [`07-vllm-cpu-selftime-experiments.md`](07-vllm-cpu-selftime-experiments.md)
+的 wait policy 实验），而不是 NumPy/Python 热点。
+
+> 上述数字来自一次 `qwen3_awq` capture，用于验证脚本可用性；本手册的 INT8 W8A8
+> 正式结论必须用同套脚本跑 §9 的 `qwen3_int8_sync*.sqlite`，不能把 AWQ 的归因
+> 比例当成 W8A8 结论。脚本本身与量化方式无关，对任何符合 Nsight schema 的
+> `.sqlite` 通用。
+
 ## 13. 核心指标
 
 正式报告至少包含：
@@ -719,6 +792,15 @@ bash labs/run_vllm_cuda_sync_profile.sh benchmark
 这些都是待验证假设，不是结论。结论必须来自相同同步调用窗口内的 GPU、Memcpy、
 NCCL 和 CPU thread-state 证据。
 
+可用 capture（`qwen3_awq`，AWQ 而非本手册的 INT8 W8A8）上用 §12 的 capstone 脚本
+已得到一条需要写进 W8A8 验证计划的经验：长同步全部落在 `A_gpu_spinning`——GPU
+在跑、调用线程同时 on-CPU ~100%。这说明假设 1/2 中"等待"二字需要细化：线程并非
+在 futex 上长睡，而是在 CPU 上 poll，因此同步窗口内的 task-clock/cycles 是真实
+CPU 消耗，假设 3（Host launch/sync 固定成本占比上升）的"成本"是可被 `perf` 采到
+的，而不是纯 off-CPU 等待。W8A8 正式 capture 采集后，必须用同套脚本确认这一
+`A_gpu_spinning` 是否仍然成立，再决定 CPU 侧优化对象是驱动完成路径还是 vLLM
+等待策略。
+
 ## 17. 结果报告模板与验收
 
 每轮至少填写：
@@ -745,7 +827,9 @@ profiler:
 | `cudaStreamSynchronize` |  |  |  |  |  |  |  |  |
 | `cudaDeviceSynchronize` |  |  |  |  |  |  |  |  |
 
-长调用归因表：
+长调用归因表（`Running`/`Blocked`/`GPU overlap` 由 `attribute_cpu_state.py`
+capstone 自动填写；`Ready` 需开 `--sample` 才能从 threadState 区分，否则留空并
+注明）：
 
 | API 区间 | Prefill/Decode | Running | Blocked | Ready | GPU overlap | Memcpy/NCCL | 调用栈 | 结论 |
 |---|---|---:|---:|---:|---|---|---|---|
