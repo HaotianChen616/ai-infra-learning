@@ -7,7 +7,36 @@ if [[ $# -gt 0 ]]; then
 fi
 
 PYTHON_BIN="${PYTHON:-python3}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-artifacts/vllm_cpu_experiments}"
+
+# Default OUTPUT_ROOT is auto-versioned from the live environment so each
+# vllm/python/model stack lands in its own directory:
+#   artifacts/vllm<v>_py<p>_<model>_<topic>
+# vllm/python versions are read via importlib.metadata (no heavy vllm import).
+# <model> = basename($MODEL) sanitized, or $MODEL_TAG verbatim, or "nomodel".
+# Override the whole root with OUTPUT_ROOT=...; tune pieces with MODEL /
+# MODEL_TAG / EXPERIMENT_TOPIC (default topic: cpu-selftime).
+default_output_root() {
+  local model_input="${MODEL_TAG:-${MODEL:-}}"
+  MODEL_INPUT="$model_input" "${PYTHON_BIN}" - <<'PY' 2>/dev/null || echo "artifacts/vllm_cpu_selftime_default"
+import importlib.metadata, re, os, sys
+def sanitize(s):
+    s = s.split('+')[0]            # drop local build suffix (0.26.0+precompiled -> 0.26.0)
+    s = s.replace('___', '.')      # HF path encoding: Qwen3___5 -> Qwen3.5
+    s = s.lower()
+    return re.sub(r'[^a-z0-9._-]', '', s)
+vllm = 'unknown'
+try:
+    vllm = sanitize(importlib.metadata.version('vllm'))
+except Exception:
+    pass
+py = '%d.%d' % sys.version_info[:2]
+model_raw = os.environ.get('MODEL_INPUT', '')
+model = sanitize(os.path.basename(model_raw)) if model_raw else 'nomodel'
+topic = os.environ.get('EXPERIMENT_TOPIC') or 'cpu-selftime'
+print('artifacts/vllm%s_py%s_%s_%s' % (vllm, py, model, topic))
+PY
+}
+OUTPUT_ROOT="${OUTPUT_ROOT:-$(default_output_root)}"
 PROFILE_SECONDS="${PROFILE_SECONDS:-30}"
 PERF_FREQ="${PERF_FREQ:-199}"
 PYSPY_RATE="${PYSPY_RATE:-100}"
@@ -46,7 +75,10 @@ print_usage() {
 Collect vLLM CUDA wait, CPU self-time, scheduler, GIL, and IRQ evidence.
 
 Environment:
-  OUTPUT_ROOT=artifacts/vllm_cpu_experiments
+  OUTPUT_ROOT           # default auto-versioned: artifacts/vllm<v>_py<p>_<model>_<topic>
+                        # e.g. artifacts/vllm0.26.0_py3.14_qwen3.5-27b-gptq-int4_cpu-selftime
+                        # <model> = basename($MODEL) sanitized, or $MODEL_TAG, or "nomodel"
+                        # EXPERIMENT_TOPIC (default cpu-selftime); set OUTPUT_ROOT=... to override
   PROFILE_SECONDS=30 PERF_FREQ=199 PYSPY_RATE=100
   TRACE_REQUESTS=1 TRACE_DECODE_STEPS=99  # example; count actual trace steps
   TRACE_THREAD_REGEX='EngineCor|Worker'  # optional thread-name filter
