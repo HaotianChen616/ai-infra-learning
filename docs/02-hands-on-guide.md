@@ -96,3 +96,8 @@ python3 labs/openai_stream_benchmark.py \
 2. 固定输入/输出长度和请求到达率。
 3. 记录 TTFT p50/p99、TPOT p50/p99、Goodput、CPU、GPU 和 KV 水位。
 4. 一次只改变一个变量，例如 token budget、Prefix Cache 或 Chunked Prefill。
+
+如果有 Linux + NVIDIA A100 + 专用 NVMe，继续完成
+[《A100 40GB GPUDirect Storage 实验手册》](04-a100-gds-hands-on.md)。该实验会对比
+Storage→CPU、Storage→CPU→GPU 和 Storage→GPU 三条路径，并要求用 strict mode、
+PCIe 观测与 checksum 证明真实 GDS 路径。

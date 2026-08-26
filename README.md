@@ -14,6 +14,8 @@
 2. 阅读 [`docs/02-hands-on-guide.md`](docs/02-hands-on-guide.md)，按顺序完成实验。
 3. 运行 `make test` 验证本地环境。
 4. 用 `make lab-kv`、`make lab-scheduler`、`make lab-prefix` 建立性能直觉。
+5. 有 Linux + A100 + 专用 NVMe 时，按
+   [`docs/04-a100-gds-hands-on.md`](docs/04-a100-gds-hands-on.md) 完成 GDS 实验。
 
 全部基础实验只依赖 Python 3.10+ 标准库，不要求 GPU，也不会自动下载模型。
 
@@ -25,12 +27,14 @@
 │   ├── 00-learning-roadmap.md
 │   ├── 01-ai-infra-quickstart.md
 │   ├── 02-hands-on-guide.md
-│   └── 03-official-reading-list.md
+│   ├── 03-official-reading-list.md
+│   └── 04-a100-gds-hands-on.md
 ├── labs/
 │   ├── kv_cache_calculator.py
 │   ├── scheduler_simulator.py
 │   ├── prefix_cache_simulator.py
-│   └── openai_stream_benchmark.py
+│   ├── openai_stream_benchmark.py
+│   └── gds/
 ├── tests/
 └── Makefile
 ```
@@ -43,6 +47,8 @@ make lab-kv
 make lab-scheduler
 make lab-prefix
 python3 labs/openai_stream_benchmark.py --help
+bash labs/gds/collect_gds_preflight.sh --help
+bash labs/gds/run_gdsio_matrix.sh --help
 ```
 
 ## 学习原则

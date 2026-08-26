@@ -6,3 +6,5 @@ venv/
 .DS_Store
 *.log
 benchmark-results/
+artifacts/
+labs/gds/build/

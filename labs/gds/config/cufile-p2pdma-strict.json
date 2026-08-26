@@ -1,0 +1,18 @@
+{
+  "logging": {
+    "level": "INFO"
+  },
+  "profile": {
+    "nvtx": false,
+    "cufile_stats": 3
+  },
+  "properties": {
+    "allow_compat_mode": false,
+    "use_pci_p2pdma": true
+  },
+  "block": {
+    "nvme": {
+      "use_pci_p2pdma": true
+    }
+  }
+}

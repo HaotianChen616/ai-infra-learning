@@ -36,3 +36,11 @@ API Server
 ```
 
 每看到一个类或参数，先回答它主要影响：正确性、TTFT、TPOT、吞吐、容量、通信还是可观测性。
+
+## GPUDirect Storage
+
+- [GDS Getting Started](https://docs.nvidia.com/gpudirect-storage/getting-started/)
+- [GDS Overview Guide](https://docs.nvidia.com/gpudirect-storage/overview-guide/)
+- [GDS Installation and Troubleshooting](https://docs.nvidia.com/gpudirect-storage/troubleshooting-guide/)
+- [GDS Benchmarking and Configuration](https://docs.nvidia.com/gpudirect-storage/configuration-guide/)
+- [cuFile API Reference](https://docs.nvidia.com/gpudirect-storage/api-reference-guide/)

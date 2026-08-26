@@ -1,4 +1,4 @@
-.PHONY: test lab-kv lab-scheduler lab-prefix
+.PHONY: test lab-kv lab-scheduler lab-prefix gds-preflight gds-build gds-summary
 
 PYTHON ?= python3
 
@@ -16,3 +16,13 @@ lab-scheduler:
 
 lab-prefix:
 	$(PYTHON) labs/prefix_cache_simulator.py
+
+gds-preflight:
+	bash labs/gds/collect_gds_preflight.sh
+
+gds-build:
+	bash labs/gds/build_cufile_verify.sh
+
+gds-summary:
+	@test -n "$(MANIFEST)" || { echo "usage: make gds-summary MANIFEST=/path/to/runs.tsv"; exit 2; }
+	$(PYTHON) labs/gds/summarize_gds_results.py --manifest "$(MANIFEST)"

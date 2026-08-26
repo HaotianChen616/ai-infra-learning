@@ -1,0 +1,12 @@
+{
+  "logging": {
+    "level": "INFO"
+  },
+  "profile": {
+    "nvtx": false,
+    "cufile_stats": 3
+  },
+  "properties": {
+    "allow_compat_mode": false
+  }
+}
