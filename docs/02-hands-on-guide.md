@@ -101,3 +101,13 @@ python3 labs/openai_stream_benchmark.py \
 [《A100 40GB GPUDirect Storage 实验手册》](04-a100-gds-hands-on.md)。该实验会对比
 Storage→CPU、Storage→CPU→GPU 和 Storage→GPU 三条路径，并要求用 strict mode、
 PCIe 观测与 checksum 证明真实 GDS 路径。
+
+如果环境是沐曦 C500，则改用
+[《沐曦 C500 MAS / GDS 等价能力实验手册》](05-metax-c500-gds-hands-on.md)。
+该实验通过 mxFIO 对比 `psync`、`cuda_io=posix` 和 `cuda_io=cufile`，并把
+“MAS API 可用”和“存储确实绕过 Host DRAM”分级验收。
+
+本地 MAS 验证通过后，如需研究远端存储直达 C500，继续阅读
+[《沐曦 C500 D2RS 设计文档》](06-metax-d2rs-design.md)，并按
+[《沐曦 C500 D2RS 实验手册》](07-metax-d2rs-experiment-guide.md)
+依次完成 GDR、dma-buf MR、RDMA Agent 和 URMA/UMMU 验证。

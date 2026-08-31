@@ -44,3 +44,18 @@ API Server
 - [GDS Installation and Troubleshooting](https://docs.nvidia.com/gpudirect-storage/troubleshooting-guide/)
 - [GDS Benchmarking and Configuration](https://docs.nvidia.com/gpudirect-storage/configuration-guide/)
 - [cuFile API Reference](https://docs.nvidia.com/gpudirect-storage/api-reference-guide/)
+
+## 沐曦 C500 MAS
+
+- [沐曦 C500 产品页](https://www.metax-tech.com/prod.html?cid=107&id=21)
+- [沐曦开发者论坛：GPUDirect Storage 特性是否支持](https://developer.metax-tech.com/forum/t/gpudirect-storagete-xing-shi-fou-zhi-chi/288/)
+- [MetaX-MACA/mxFIO](https://github.com/MetaX-MACA/mxFIO)
+- [MXMACA-C500 发布说明入口](https://developer.metax-tech.com/doc/222)
+- [沐曦开发者论坛：C500 支持 GDR](https://developer.metax-tech.com/forum/t/mu-xi-c500shi-fou-zhi-chi-gpudirect-rdma/445/)
+
+## D2RS、dma-buf 与灵衢 URMA
+
+- [Linux dma-buf 官方文档](https://docs.kernel.org/driver-api/dma-buf.html)
+- [rdma-core：`ibv_reg_dmabuf_mr` API](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_reg_mr.3)
+- [openEuler UMDK / URMA](https://gitcode.com/openeuler/umdk)
+- [openEuler UBS IO / NDS](https://gitcode.com/openeuler/ubs-io)

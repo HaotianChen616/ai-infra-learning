@@ -8,3 +8,4 @@ venv/
 benchmark-results/
 artifacts/
 labs/gds/build/
+labs/metax_d2rs/build*/

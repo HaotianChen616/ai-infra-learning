@@ -1,4 +1,4 @@
-.PHONY: test lab-kv lab-scheduler lab-prefix gds-preflight gds-build gds-summary
+.PHONY: test lab-kv lab-scheduler lab-prefix gds-preflight gds-build gds-summary metax-preflight metax-summary metax-d2rs-build metax-d2rs-test
 
 PYTHON ?= python3
 
@@ -26,3 +26,17 @@ gds-build:
 gds-summary:
 	@test -n "$(MANIFEST)" || { echo "usage: make gds-summary MANIFEST=/path/to/runs.tsv"; exit 2; }
 	$(PYTHON) labs/gds/summarize_gds_results.py --manifest "$(MANIFEST)"
+
+metax-preflight:
+	bash labs/metax_gds/collect_metax_preflight.sh
+
+metax-summary:
+	@test -n "$(MANIFEST)" || { echo "usage: make metax-summary MANIFEST=/path/to/runs.tsv"; exit 2; }
+	$(PYTHON) labs/metax_gds/summarize_mxfio_results.py --manifest "$(MANIFEST)"
+
+metax-d2rs-build:
+	cmake -S labs/metax_d2rs -B labs/metax_d2rs/build -DCMAKE_BUILD_TYPE=Release
+	cmake --build labs/metax_d2rs/build -j
+
+metax-d2rs-test: metax-d2rs-build
+	ctest --test-dir labs/metax_d2rs/build --output-on-failure

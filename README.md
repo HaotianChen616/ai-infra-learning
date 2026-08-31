@@ -5,6 +5,7 @@
 - GPU 服务器中的 CPU 机头与 NUMA/PCIe 拓扑
 - Prefill、Decode、Continuous Batching 与调度
 - KV Cache、PagedAttention、Prefix Cache 与 Offload
+- A100 GDS、沐曦 C500 MAS/GDR 与远端 D2RS
 - vLLM、SGLang、PyTorch 的分层关系
 - TTFT、TPOT、Goodput 等服务指标
 
@@ -16,6 +17,13 @@
 4. 用 `make lab-kv`、`make lab-scheduler`、`make lab-prefix` 建立性能直觉。
 5. 有 Linux + A100 + 专用 NVMe 时，按
    [`docs/04-a100-gds-hands-on.md`](docs/04-a100-gds-hands-on.md) 完成 GDS 实验。
+6. 有 Linux + 沐曦 C500 + 专用 NVMe 时，按
+   [`docs/05-metax-c500-gds-hands-on.md`](docs/05-metax-c500-gds-hands-on.md)
+   验证 MACA MAS 的 GDS 等价能力。
+7. 要实现 C500 直通远端存储时，先读
+   [`docs/06-metax-d2rs-design.md`](docs/06-metax-d2rs-design.md)，再按
+   [`docs/07-metax-d2rs-experiment-guide.md`](docs/07-metax-d2rs-experiment-guide.md)
+   分阶段完成 RDMA → URMA 验证。
 
 全部基础实验只依赖 Python 3.10+ 标准库，不要求 GPU，也不会自动下载模型。
 
@@ -28,13 +36,18 @@
 │   ├── 01-ai-infra-quickstart.md
 │   ├── 02-hands-on-guide.md
 │   ├── 03-official-reading-list.md
-│   └── 04-a100-gds-hands-on.md
+│   ├── 04-a100-gds-hands-on.md
+│   ├── 05-metax-c500-gds-hands-on.md
+│   ├── 06-metax-d2rs-design.md
+│   └── 07-metax-d2rs-experiment-guide.md
 ├── labs/
 │   ├── kv_cache_calculator.py
 │   ├── scheduler_simulator.py
 │   ├── prefix_cache_simulator.py
 │   ├── openai_stream_benchmark.py
-│   └── gds/
+│   ├── gds/
+│   ├── metax_gds/
+│   └── metax_d2rs/
 ├── tests/
 └── Makefile
 ```
@@ -49,6 +62,10 @@ make lab-prefix
 python3 labs/openai_stream_benchmark.py --help
 bash labs/gds/collect_gds_preflight.sh --help
 bash labs/gds/run_gdsio_matrix.sh --help
+bash labs/metax_gds/collect_metax_preflight.sh --help
+bash labs/metax_gds/run_mxfio_matrix.sh --help
+make metax-d2rs-test
+bash labs/metax_d2rs/tools/check_env.sh --help
 ```
 
 ## 学习原则

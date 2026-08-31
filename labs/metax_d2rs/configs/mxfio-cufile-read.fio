@@ -1,0 +1,16 @@
+[global]
+filename=/mnt/nvme/d2rs-test.bin
+ioengine=libcufile
+direct=1
+readwrite=read
+bs=1M
+size=16G
+time_based=1
+runtime=60
+ramp_time=10
+numjobs=1
+group_reporting=1
+gpu_dev_ids=0
+cuda_io=cufile
+
+[mas_direct_read]
