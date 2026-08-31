@@ -17,6 +17,9 @@ ctest --test-dir build --output-on-failure
 ./build/d2rs_demo --self-test --json
 ```
 
+`--self-test` 会临时创建 `/tmp/d2rs-self-test-XXXXXX`，完成 pattern 校验后立即删除；它不会生成或保留
+`/mnt/nvme/d2rs-test.bin`。后者是 fio/mxFIO 和文件范围实验使用的持久测试文件，需要按实验手册 3.4 节显式创建。
+
 没有 CMake 时，可以直接编译核心 Demo：
 
 ```bash
@@ -25,7 +28,7 @@ c++ -std=c++17 -O2 -pthread -Iinclude \
 ./d2rs_demo --self-test
 ```
 
-读取指定文件：
+读取已经显式创建的指定文件：
 
 ```bash
 ./build/d2rs_demo \

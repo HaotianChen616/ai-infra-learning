@@ -23,7 +23,8 @@
 
 - 所有 fio/mxFIO 实验使用专用文件 `/mnt/nvme/d2rs-test.bin`；
 - 本手册默认只读，不对生产文件或裸盘执行写测试；
-- 首次运行前确认挂载点和测试文件；
+- `--self-test` 只创建并删除 `/tmp/d2rs-self-test-XXXXXX`，不会生成或保留 `/mnt/nvme/d2rs-test.bin`；
+- 首次运行前确认挂载点，并按 3.4 节显式创建持久测试文件；
 - 修改 IOMMU、ACS、PFC、驱动或内核参数前保存原配置和回滚步骤；
 - `iommu=off` 只用于隔离故障的 A/B 实验，不作为默认或生产配置。
 
@@ -129,7 +130,15 @@ c++ -std=c++17 -O2 -pthread -Iinclude \
 ./d2rs_demo --self-test --json
 ```
 
-### 3.2 通过标准
+### 3.2 自测文件的生命周期
+
+`--self-test` 不依赖预先准备的数据文件。Demo 会通过 `mkstemp` 创建一个约 9 MiB 的
+`/tmp/d2rs-self-test-XXXXXX`，写入确定性 pattern，执行非对齐范围读取和校验，随后在正常退出或异常路径中删除该文件。
+
+因此，执行自测后看不到 `d2rs-test.bin` 是预期行为。构建、`ctest` 和 `--self-test` 都不会创建后续 fio/mxFIO 使用的
+`/mnt/nvme/d2rs-test.bin`。
+
+### 3.3 通过标准
 
 预期关键字段：
 
@@ -145,11 +154,49 @@ c++ -std=c++17 -O2 -pthread -Iinclude \
 
 `direct_data_path=false` 是正确结果。模拟后端经过 Host staging，不是硬件直通。
 
-### 3.3 文件范围测试
+### 3.4 创建持久测试文件并做范围测试
+
+`d2rs-test.bin` 是本实验生成的合成数据，不需要从外部下载。应在专用 NVMe 挂载点显式创建；以下命令在文件已经存在时拒绝覆盖：
+
+```bash
+export D2RS_FILE=/mnt/nvme/d2rs-test.bin
+if test -e "${D2RS_FILE}"; then
+  echo "文件已存在，拒绝覆盖：${D2RS_FILE}" >&2
+else
+  fio \
+    --name=create-d2rs-data \
+    --filename="${D2RS_FILE}" \
+    --rw=write \
+    --ioengine=psync \
+    --bs=1M \
+    --size=16G \
+    --direct=1 \
+    --buffer_pattern=0x0123456789abcdef \
+    --end_fsync=1
+
+  ls -lh "${D2RS_FILE}"
+  sha256sum "${D2RS_FILE}" > "${D2RS_RESULTS}/d2rs-test.sha256"
+fi
+```
+
+只做 Demo 功能验证时，可先创建 1 GiB 零填充文件：
+
+```bash
+export D2RS_FILE=/mnt/nvme/d2rs-test.bin
+dd if=/dev/zero \
+  of="${D2RS_FILE}" \
+  bs=1M count=1024 \
+  oflag=direct conv=excl \
+  status=progress
+```
+
+`conv=excl` 同样会在目标文件已存在时失败。若挂载点不支持 direct I/O，去掉 `oflag=direct` 只影响文件准备过程，不代表 D2RS 数据面已通过验证。
+
+然后运行范围测试：
 
 ```bash
 ./build/d2rs_demo \
-  --input /mnt/nvme/d2rs-test.bin \
+  --input "${D2RS_FILE}" \
   --offset 4K \
   --length 1G \
   --chunk 4M \
@@ -249,11 +296,12 @@ make -j 12
 
 ### 6.2 准备只读测试文件
 
-在专用 NVMe 挂载点创建文件并记录校验：
+使用 3.4 节显式创建的专用文件；不要再次运行创建命令覆盖它。开始基线测试前检查大小和初始校验：
 
 ```bash
-fallocate -l 16G /mnt/nvme/d2rs-test.bin
-sha256sum /mnt/nvme/d2rs-test.bin > "${D2RS_RESULTS}/d2rs-test.sha256"
+test -f /mnt/nvme/d2rs-test.bin
+ls -lh /mnt/nvme/d2rs-test.bin
+sha256sum -c "${D2RS_RESULTS}/d2rs-test.sha256"
 ```
 
 ### 6.3 三路径对比
